@@ -1,0 +1,106 @@
+/**
+ * Shapes returned by the Rust backend. Kept in one place so a change to a
+ * backend struct surfaces as a compile error here rather than at runtime.
+ */
+
+export interface Credential {
+  id: string;
+  service: string;
+  username: string;
+  password_encrypted: string;
+  url: string;
+  notes: string;
+  created_at: string;
+  totp_secret: string | null;
+  totp_code: string | null;
+}
+
+export interface CredentialInput {
+  service: string;
+  username: string;
+  password: string;
+  url: string;
+  notes: string;
+}
+
+export interface Project {
+  id: string;
+  name: string;
+  description: string;
+  target: string;
+  methodology: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface ProjectInput {
+  name: string;
+  description: string;
+  target: string;
+  methodology: string;
+}
+
+export interface JournalEntry {
+  id: string;
+  project_id: string;
+  title: string;
+  content: string;
+  entry_type: string;
+  severity: string;
+  created_at: string;
+}
+
+export interface EntryInput {
+  project_id: string;
+  title: string;
+  content: string;
+  entry_type: string;
+  severity: string;
+}
+
+export interface KBEntry {
+  id: string;
+  title: string;
+  command: string;
+  description: string;
+  tags: string;
+  category: string;
+  created_at: string;
+}
+
+export interface KBInput {
+  title: string;
+  command: string;
+  description: string;
+  tags: string;
+  category: string;
+}
+
+export interface ActivityEntry {
+  id: string;
+  action: string;
+  detail: string;
+  timestamp: string;
+}
+
+export interface NmapPort {
+  port: number;
+  protocol: string;
+  state: string;
+  service: string;
+  version: string | null;
+}
+
+export interface NmapHost {
+  ip: string;
+  hostname: string | null;
+  os: string | null;
+  ports: NmapPort[];
+}
+
+export interface NmapScan {
+  hosts: NmapHost[];
+  total_hosts: number;
+  total_open_ports: number;
+}

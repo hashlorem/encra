@@ -1,0 +1,31 @@
+node_modules/
+dist/
+target/
+.env
+*.db
+*.sqlite
+
+# Build stamp
+tsconfig.tsbuildinfo
+
+# Vault backups must never be committed: they are portable copies of the vault.
+*.cobrypt
+*.kpt
+
+# SQLite sidecar files (WAL, shared memory, rollback journal)
+*.db-wal
+*.db-shm
+*.db-journal
+
+# macOS
+.DS_Store
+
+# Local AI tool state and scratch copies
+.crush/
+.backups/
+
+# Tauri generated capability schemas
+src-tauri/gen/schemas/
+
+# Separate repo (portfolio site), not part of the app
+portfolio/
