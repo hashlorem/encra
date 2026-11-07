@@ -51,13 +51,14 @@ struct Server {
     _lock: File,
 }
 
-type Notify = Box<dyn Fn() + Send + Sync>;
+/// Called whenever the queue changes: (requests waiting, whether one just
+/// arrived). Drives the Dock badge, the bounce and the dialog.
+type Notify = Box<dyn Fn(usize, bool) + Send + Sync>;
 type Log = Box<dyn Fn(&str, &str) + Send + Sync>;
 
 pub struct Hub {
     pending: Mutex<HashMap<String, (PendingInfo, Sender<Decision>)>>,
     server: Mutex<Option<Server>>,
-    /// Tell the UI a request arrived (bring the window forward).
     notify: Notify,
     /// Best-effort activity log entry: (action, detail).
     log: Log,
@@ -120,20 +121,33 @@ impl Hub {
         self.cancel_all("agent access was turned off");
     }
 
+    fn changed(&self, arrived: bool) {
+        let waiting = self.pending.lock().map(|p| p.len()).unwrap_or(0);
+        (self.notify)(waiting, arrived);
+    }
+
     pub fn pending(&self) -> Vec<PendingInfo> {
         self.pending.lock().map(|p| p.values().map(|(info, _)| info.clone()).collect()).unwrap_or_default()
     }
 
     /// Remove a request so exactly one decision can be made on it.
     pub fn take(&self, id: &str) -> Option<(PendingInfo, Sender<Decision>)> {
-        self.pending.lock().ok()?.remove(id)
+        let taken = self.pending.lock().ok()?.remove(id);
+        if taken.is_some() {
+            self.changed(false);
+        }
+        taken
     }
 
     /// End every waiting request without a secret (on seal, or turning off).
     pub fn cancel_all(&self, reason: &str) {
         let drained: Vec<_> = self.pending.lock().map(|mut p| p.drain().collect()).unwrap_or_default();
+        let any = !drained.is_empty();
         for (_, (_, tx)) in drained {
             let _ = tx.send(Decision::Fail(reason.to_string()));
+        }
+        if any {
+            self.changed(false);
         }
     }
 
@@ -175,7 +189,7 @@ impl Hub {
         if let Ok(mut pending) = self.pending.lock() {
             pending.insert(id.clone(), (info, tx));
         }
-        (self.notify)();
+        self.changed(true);
 
         let started = Instant::now();
         let response = loop {

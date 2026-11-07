@@ -10,7 +10,7 @@ import Activity from "./Activity";
 import Settings from "./Settings";
 import { Print } from "../components/Print";
 import { Wordmark } from "../components/Wordmark";
-import { playUnlockChime, playLockChime } from "../lib/chime";
+import { playUnlockChime, playLockChime, playRequestChime } from "../lib/chime";
 import {
   PREFERENCE_KEYS,
   readBooleanPreference,
@@ -65,7 +65,14 @@ function Dashboard({ onLock }: DashboardProps) {
 
   useEffect(() => {
     loadAgentRequests();
-    const unlisten = listen("agent-request", loadAgentRequests);
+    // The backend reports the queue size on every change: an arrival, an
+    // answer, a timeout, a caller giving up. Chime only when it grows.
+    let waiting = 0;
+    const unlisten = listen<number>("agent-request", (event) => {
+      if (event.payload > waiting && readBooleanPreference(PREFERENCE_KEYS.sound, true)) playRequestChime();
+      waiting = event.payload;
+      loadAgentRequests();
+    });
     return () => {
       void unlisten.then((stop) => stop());
     };

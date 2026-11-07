@@ -24,6 +24,31 @@ function ctx(): AudioContext | null {
   }
 }
 
+/** Two quick soft notes: something is waiting for you (an agent request). */
+export function playRequestChime() {
+  const c = ctx();
+  if (!c) return;
+  try {
+    const now = c.currentTime;
+    [660, 880].forEach((freq, i) => {
+      const start = now + i * 0.12;
+      const gain = c.createGain();
+      gain.connect(c.destination);
+      gain.gain.setValueAtTime(0, start);
+      gain.gain.linearRampToValueAtTime(0.1, start + 0.015);
+      gain.gain.exponentialRampToValueAtTime(0.0001, start + 0.4);
+      const osc = c.createOscillator();
+      osc.type = "sine";
+      osc.frequency.setValueAtTime(freq, start);
+      osc.connect(gain);
+      osc.start(start);
+      osc.stop(start + 0.45);
+    });
+  } catch {
+    // Sound is a nicety; never let it break the request flow.
+  }
+}
+
 export function playUnlockChime() {
   const c = ctx();
   if (!c) return;

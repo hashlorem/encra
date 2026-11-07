@@ -194,6 +194,7 @@ fn run(args: &[String]) -> Result<i32, String> {
             cwd: cwd.display().to_string(),
             references,
         };
+        eprintln!("encra: waiting for you to approve in Encra…");
         match ask(&sock::socket_path(&sock::default_dir()), &request)? {
             Response::Approved(values) => {
                 for (_, value) in env.iter_mut().filter(|(_, v)| refs::is_reference(v)) {

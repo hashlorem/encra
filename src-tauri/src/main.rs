@@ -1376,12 +1376,20 @@ fn main() {
             let notify_handle = app.handle().clone();
             let log_handle = app.handle().clone();
             let hub = agent::server::Hub::new(
-                Box::new(move || {
-                    let _ = notify_handle.emit("agent-request", ());
+                Box::new(move |waiting: usize, arrived: bool| {
+                    let _ = notify_handle.emit("agent-request", waiting);
                     if let Some(window) = notify_handle.get_webview_window("main") {
-                        let _ = window.unminimize();
-                        let _ = window.show();
-                        let _ = window.set_focus();
+                        // A count on the Dock icon while anything is waiting.
+                        let _ = window.set_badge_count((waiting > 0).then_some(waiting as i64));
+                        if arrived {
+                            // Bounce until answered, and come forward.
+                            let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
+                            let _ = window.unminimize();
+                            let _ = window.show();
+                            let _ = window.set_focus();
+                        } else if waiting == 0 {
+                            let _ = window.request_user_attention(None);
+                        }
                     }
                 }),
                 Box::new(move |action: &str, detail: &str| {
@@ -2099,7 +2107,7 @@ mod tests {
         let db = Arc::new(Mutex::new(conn));
         let log_db = Arc::clone(&db);
         let hub = agent::server::Hub::new(
-            Box::new(|| {}),
+            Box::new(|_, _| {}),
             Box::new(move |action, detail| {
                 if let Ok(db) = log_db.lock() {
                     activity::log_action(&db, action, detail);
@@ -2308,7 +2316,7 @@ mod tests {
         // The socket is owner-only, and a second server cannot take over.
         use std::os::unix::fs::PermissionsExt;
         assert_eq!(std::fs::metadata(&rig.socket).unwrap().permissions().mode() & 0o777, 0o600);
-        let other = agent::server::Hub::new(Box::new(|| {}), Box::new(|_, _| {}), agent::server::REQUEST_TIMEOUT);
+        let other = agent::server::Hub::new(Box::new(|_, _| {}), Box::new(|_, _| {}), agent::server::REQUEST_TIMEOUT);
         assert!(other.start(rig.socket.parent().unwrap()).is_err());
         drop(other);
         rig.finish();
