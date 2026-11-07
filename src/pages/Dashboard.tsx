@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { AgentRequestDialog } from "../components/AgentRequestDialog";
+import type { AgentRequest } from "../lib/types";
 import Vault from "./Vault";
 import Journal from "./Journal";
 import Tools from "./Tools";
@@ -51,6 +54,22 @@ interface DashboardProps {
 function Dashboard({ onLock }: DashboardProps) {
   const [active, setActive] = useState<Module>("vault");
   const [sealing, setSealing] = useState(false);
+  const [agentRequests, setAgentRequests] = useState<AgentRequest[]>([]);
+
+  // Requests from `encra run`: any that arrived while sealed, then each new one.
+  const loadAgentRequests = useCallback(() => {
+    invoke<AgentRequest[]>("agent_pending")
+      .then(setAgentRequests)
+      .catch(() => setAgentRequests([]));
+  }, []);
+
+  useEffect(() => {
+    loadAgentRequests();
+    const unlisten = listen("agent-request", loadAgentRequests);
+    return () => {
+      void unlisten.then((stop) => stop());
+    };
+  }, [loadAgentRequests]);
 
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastActivityRef = useRef(0);
@@ -204,6 +223,10 @@ function Dashboard({ onLock }: DashboardProps) {
           </span>
         </button>
       </aside>
+
+      {agentRequests[0] && (
+        <AgentRequestDialog key={agentRequests[0].id} request={agentRequests[0]} onDone={loadAgentRequests} />
+      )}
 
       <main className="workspace" ref={contentRef} tabIndex={-1}>
         <div key={active} className="view">

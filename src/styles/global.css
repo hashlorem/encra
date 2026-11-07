@@ -1205,6 +1205,19 @@ fieldset {
   animation: rise var(--dur) var(--ease) backwards;
 }
 
+/* ---------- Agent requests ---------- */
+
+.agent-dialog {
+  width: min(600px, 100%);
+}
+
+.agent-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 15px;
+}
+
 /* ---------- Narrow windows ---------- */
 
 @media (max-width: 960px) {

@@ -140,6 +140,12 @@ pub fn migrate_to_format_3(db: &Connection, dek: &[u8; 32]) -> Result<bool, Stri
             .map_err(|e| e.to_string())?;
         Ok(())
     })?;
+    // The rewrite left the old plain-text names and log details in free pages.
+    // Rebuild the file so they are gone, not just unreferenced. Best effort:
+    // the migration itself has already committed.
+    if let Err(error) = db.execute_batch("PRAGMA secure_delete = ON; VACUUM;") {
+        eprintln!("Encra could not compact the vault after upgrading: {error}");
+    }
     Ok(true)
 }
 

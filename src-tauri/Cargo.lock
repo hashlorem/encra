@@ -857,6 +857,7 @@ dependencies = [
  "argon2",
  "base64 0.22.1",
  "hmac",
+ "libc",
  "quick-xml 0.37.5",
  "rand 0.8.7",
  "reqwest 0.12.28",

@@ -64,6 +64,10 @@ pub struct AppState {
 
 pub fn init_db(path: &Path) -> Result<Connection, String> {
     let conn = Connection::open(path).map_err(|e| e.to_string())?;
+    // Overwrite deleted content with zeros instead of leaving it in free pages,
+    // where a deleted login or an edited log entry could be recovered from the
+    // file with a hex editor.
+    conn.execute_batch("PRAGMA secure_delete = ON;").map_err(|e| e.to_string())?;
 
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS credentials (

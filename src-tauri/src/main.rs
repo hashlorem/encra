@@ -8,6 +8,7 @@ mod nmap;
 mod kb;
 mod backup;
 mod activity;
+mod agent;
 mod clipboard;
 mod credentials;
 mod fields;
@@ -16,7 +17,7 @@ mod util;
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 use util::{check_field, constant_time_eq, fill_random, uuid_v4, wipe_strings};
 use clipboard::ClipboardGuard;
 use credentials::{CopyField, CredentialDetail, CredentialSummary, PasswordProfile, TotpCode};
@@ -29,11 +30,13 @@ const CURRENT_DATABASE_NAME: &str = "encra.db";
 /// Earlier product names as (bundle identifier, database file), newest first.
 /// Only the first vault found is copied, so an old KeyRPT file can never win
 /// over a newer Cobrypt vault.
+#[cfg_attr(debug_assertions, allow(dead_code))] // release builds and tests only
 const LEGACY_VAULTS: &[(&str, &str)] = &[
     ("com.cobrypt.desktop", "cobrypt.db"),
     ("com.keyrpt.app", "keyrpt.db"),
 ];
 
+#[cfg_attr(debug_assertions, allow(dead_code))] // release builds and tests only
 fn copy_database_atomically(source: &Path, destination: &Path) -> Result<(), String> {
     let parent = destination.parent().ok_or("Encra database path has no parent")?;
     std::fs::create_dir_all(parent).map_err(|e| format!("failed to create Encra data directory: {e}"))?;
@@ -78,6 +81,7 @@ fn copy_database_atomically(source: &Path, destination: &Path) -> Result<(), Str
     migration
 }
 
+#[cfg_attr(debug_assertions, allow(dead_code))] // release builds and tests only
 fn migrate_database_if_needed(current: &Path, candidates: &[PathBuf]) -> Result<bool, String> {
     if current.exists() {
         return Ok(false);
@@ -94,6 +98,7 @@ fn migrate_database_if_needed(current: &Path, candidates: &[PathBuf]) -> Result<
 /// Where an earlier vault may live, in the order it should be preferred: for
 /// each old product, a renamed file in this app's own data directory first,
 /// then the old app's data directory beside it.
+#[cfg_attr(debug_assertions, allow(dead_code))] // release builds and tests only
 fn legacy_database_candidates(current_dir: &Path) -> Vec<PathBuf> {
     let mut candidates = Vec::new();
     for (identifier, file) in LEGACY_VAULTS {
@@ -136,18 +141,28 @@ fn restrict_permissions(_db_path: &Path) -> Result<(), String> {
 }
 
 fn vault_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
-    // Debug builds only: lets a dev run use a throwaway vault, so smoke tests
-    // never touch the real one. `debug_assertions` is off in release builds,
-    // so this branch does not exist in a shipped app.
+    let current_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
+
+    // Debug builds never open the real vault. ENCRA_DATA_DIR points one at a
+    // throwaway folder; without it, a debug build gets its own folder beside
+    // the real one and migrates nothing into it. `debug_assertions` is off in
+    // release builds, so none of this exists in a shipped app.
     #[cfg(debug_assertions)]
-    if let Some(dir) = std::env::var_os("ENCRA_DATA_DIR") {
-        return Ok(PathBuf::from(dir).join(CURRENT_DATABASE_NAME));
+    {
+        if let Some(dir) = std::env::var_os("ENCRA_DATA_DIR") {
+            return Ok(PathBuf::from(dir).join(CURRENT_DATABASE_NAME));
+        }
+        let mut dev = current_dir.into_os_string();
+        dev.push(".dev");
+        Ok(PathBuf::from(dev).join(CURRENT_DATABASE_NAME))
     }
 
-    let current_dir = app.path().app_data_dir().map_err(|e| e.to_string())?;
-    let current_path = current_dir.join(CURRENT_DATABASE_NAME);
-    migrate_database_if_needed(&current_path, &legacy_database_candidates(&current_dir))?;
-    Ok(current_path)
+    #[cfg(not(debug_assertions))]
+    {
+        let current_path = current_dir.join(CURRENT_DATABASE_NAME);
+        migrate_database_if_needed(&current_path, &legacy_database_candidates(&current_dir))?;
+        Ok(current_path)
+    }
 }
 
 /// Minimum master-password length accepted when a password is *created* or
@@ -753,11 +768,14 @@ fn seal_detail(reason: Option<&str>) -> &'static str {
 fn lock_vault(
     state: tauri::State<AppState>,
     clipboard: tauri::State<Arc<ClipboardGuard>>,
+    hub: tauri::State<Arc<agent::server::Hub>>,
     reason: Option<String>,
 ) -> Result<(), String> {
     // Every lock path (button, shortcut, idle timer, blur) ends here, so this
     // is the one place a still-pending copied secret gets wiped.
     clipboard.wipe_now();
+    // Nothing waiting for approval may outlive the seal.
+    hub.cancel_all("the vault was sealed");
     let db = require_db(&state)?;
     activity::log_action(&db, "lock", seal_detail(reason.as_deref()));
     let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
@@ -1205,9 +1223,130 @@ fn reset_master_password(state: tauri::State<AppState>, recovery_code: String, n
     Ok(true)
 }
 
+// ===== Agent access (encra run) =====
+
+fn agent_access_enabled(db: &Connection) -> bool {
+    db.query_row("SELECT value FROM vault_config WHERE key = 'agent_access'", [], |row| row.get::<_, String>(0))
+        .map(|value| value == "on")
+        .unwrap_or(false)
+}
+
+#[derive(serde::Serialize)]
+struct AgentStatus {
+    enabled: bool,
+    listening: bool,
+    /// The binary to put on PATH, as `encra`.
+    binary: String,
+}
+
+fn agent_status_of(db: &Connection, hub: &agent::server::Hub) -> AgentStatus {
+    AgentStatus {
+        enabled: agent_access_enabled(db),
+        listening: hub.is_running(),
+        binary: std::env::current_exe()
+            .and_then(|p| p.canonicalize())
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+#[tauri::command]
+fn agent_status(state: tauri::State<AppState>, hub: tauri::State<Arc<agent::server::Hub>>) -> Result<AgentStatus, String> {
+    let _key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    Ok(agent_status_of(&db, &hub))
+}
+
+#[tauri::command]
+fn set_agent_access(
+    state: tauri::State<AppState>,
+    hub: tauri::State<Arc<agent::server::Hub>>,
+    enabled: bool,
+) -> Result<AgentStatus, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    if enabled {
+        hub.start(&agent::sock::default_dir())?;
+    } else {
+        hub.stop();
+    }
+    db.execute(
+        "INSERT OR REPLACE INTO vault_config (key, value) VALUES ('agent_access', ?1)",
+        [if enabled { "on" } else { "off" }],
+    )
+    .map_err(|e| e.to_string())?;
+    activity::log_action(&db, "agent_access", if enabled { "agent access turned on" } else { "agent access turned off" });
+    seal_log(&db, &key);
+    Ok(agent_status_of(&db, &hub))
+}
+
+#[tauri::command]
+fn agent_pending(state: tauri::State<AppState>, hub: tauri::State<Arc<agent::server::Hub>>) -> Result<Vec<agent::server::PendingInfo>, String> {
+    let _key = require_unlocked(&state)?;
+    Ok(hub.pending())
+}
+
+/// Answer one waiting request. Only reachable unlocked, so a request can
+/// never resolve while the vault is sealed.
+#[tauri::command]
+fn agent_decide(
+    state: tauri::State<AppState>,
+    hub: tauri::State<Arc<agent::server::Hub>>,
+    id: String,
+    approve: bool,
+) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    let result = decide_agent_request(&db, &key, &hub, &id, approve);
+    seal_log(&db, &key);
+    result
+}
+
+fn decide_agent_request(db: &Connection, key: &[u8; 32], hub: &agent::server::Hub, id: &str, approve: bool) -> Result<(), String> {
+    use agent::server::Decision;
+    let (info, reply) = hub.take(id).ok_or("that request is no longer waiting")?;
+    let place = format!("{} in {}", info.executable, info.cwd);
+    if !approve {
+        let _ = reply.send(Decision::Deny);
+        activity::log_action(db, "agent_denied", &format!("denied {place}"));
+        return Ok(());
+    }
+
+    let mut values = Vec::with_capacity(info.references.len());
+    let mut given = Vec::with_capacity(info.references.len());
+    for reference in &info.references {
+        match agent::refs::resolve(db, key, reference) {
+            Ok((login_id, value)) => {
+                let field = agent::refs::parse(reference).map(|r| agent::refs::field_name(r.field)).unwrap_or("?");
+                // The login's id, not its name: the log is readable while sealed.
+                given.push(format!("{field} of login {}", &login_id[..login_id.len().min(8)]));
+                values.push((reference.clone(), zeroize::Zeroizing::new(value.as_bytes().to_vec())));
+            }
+            Err(error) => {
+                let _ = reply.send(Decision::Fail(error.clone()));
+                activity::log_action(db, "agent_failed", &format!("approved but a reference could not be resolved: {place}"));
+                return Err(error);
+            }
+        }
+    }
+    if reply.send(Decision::Approve(values)).is_err() {
+        activity::log_action(db, "agent_cancelled", &format!("approved after the caller left: {place}"));
+        return Err("the caller is no longer waiting".into());
+    }
+    activity::log_action(db, "agent_approved", &format!("gave {} to {place}", given.join(", ")));
+    Ok(())
+}
+
 // ===== Startup =====
 
 fn main() {
+    // `encra run ...` is the command-line client for agent access. It never
+    // starts the app; it talks to the one already running.
+    let args: Vec<String> = std::env::args().collect();
+    if args.get(1).map(String::as_str) == Some("run") {
+        std::process::exit(agent::client::main(&args[2..]));
+    }
+
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
@@ -1238,6 +1377,36 @@ fn main() {
                 encryption_key: Mutex::new(None),
             });
             app.manage(ClipboardGuard::system());
+
+            // Agent access. The hub exists always; it only listens while the
+            // setting is on.
+            let notify_handle = app.handle().clone();
+            let log_handle = app.handle().clone();
+            let hub = agent::server::Hub::new(
+                Box::new(move || {
+                    let _ = notify_handle.emit("agent-request", ());
+                    if let Some(window) = notify_handle.get_webview_window("main") {
+                        let _ = window.unminimize();
+                        let _ = window.show();
+                        let _ = window.set_focus();
+                    }
+                }),
+                Box::new(move |action: &str, detail: &str| {
+                    if let Some(state) = log_handle.try_state::<AppState>() {
+                        if let Ok(db) = state.db.lock() {
+                            activity::log_action(&db, action, detail);
+                        }
+                    }
+                }),
+                agent::server::REQUEST_TIMEOUT,
+            );
+            let enabled = app.state::<AppState>().db.lock().map(|db| agent_access_enabled(&db)).unwrap_or(false);
+            if enabled {
+                if let Err(error) = hub.start(&agent::sock::default_dir()) {
+                    eprintln!("Encra could not start agent access: {error}");
+                }
+            }
+            app.manage(hub);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -1246,6 +1415,7 @@ fn main() {
             add_credential, update_credential, delete_credential,
             vault_status, create_vault, unlock_vault, lock_vault,
             safety_copy_exists, delete_safety_copy,
+            agent_status, set_agent_access, agent_pending, agent_decide,
             setup_totp, get_totp_remaining, remove_totp,
             check_hibp,
             create_project, get_projects, delete_project,
@@ -1915,6 +2085,239 @@ mod tests {
         // Anything else, including text meant to forge a log line, is ignored.
         assert_eq!(seal_detail(Some("vault unlocked\nunlock")), "vault locked");
         assert_eq!(seal_detail(None), "vault locked");
+    }
+
+    // ===== Agent access, end to end over a real socket =====
+
+    struct AgentRig {
+        dir: PathBuf,
+        db: Arc<Mutex<Connection>>,
+        dek: [u8; 32],
+        hub: Arc<agent::server::Hub>,
+        socket: PathBuf,
+    }
+
+    /// A format-3 vault, a hub logging into it, and a live socket.
+    fn agent_rig(label: &str, timeout: std::time::Duration) -> AgentRig {
+        let (dir, path, dek) = format_2_vault(label);
+        let conn = vault::init_db(&path).unwrap();
+        bring_up_to_date(&conn, V2_PASSWORD, &dek).unwrap();
+        let db = Arc::new(Mutex::new(conn));
+        let log_db = Arc::clone(&db);
+        let hub = agent::server::Hub::new(
+            Box::new(|| {}),
+            Box::new(move |action, detail| {
+                if let Ok(db) = log_db.lock() {
+                    activity::log_action(&db, action, detail);
+                }
+            }),
+            timeout,
+        );
+        // Short folder name: macOS caps socket paths near 104 bytes.
+        let socket_dir = PathBuf::from(format!("/private/tmp/encra-test-{}", &uuid_v4()[..8]));
+        hub.start(&socket_dir).unwrap();
+        let socket = agent::sock::socket_path(&socket_dir);
+        AgentRig { dir, db, dek, hub, socket }
+    }
+
+    impl AgentRig {
+        fn ask_in_background(&self, references: &[&str]) -> std::thread::JoinHandle<Result<agent::protocol::Response, String>> {
+            let socket = self.socket.clone();
+            let request = agent::protocol::Request {
+                agent: "test-agent".into(),
+                argv: vec!["/usr/bin/env".into()],
+                executable: "/usr/bin/env".into(),
+                cwd: "/private/tmp".into(),
+                references: references.iter().map(|r| r.to_string()).collect(),
+            };
+            std::thread::spawn(move || agent::client::ask(&socket, &request))
+        }
+
+        fn wait_for_pending(&self) -> agent::server::PendingInfo {
+            // Generous: both ends hash the (50 MB, debug) test binary to check
+            // each other, which is slow while Argon2 tests run alongside.
+            for _ in 0..3000 {
+                if let Some(info) = self.hub.pending().into_iter().next() {
+                    return info;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            panic!("no request arrived");
+        }
+
+        fn actions(&self) -> Vec<String> {
+            activity_actions(&self.db.lock().unwrap())
+        }
+
+        fn finish(self) {
+            let socket_dir = self.socket.parent().unwrap().to_path_buf();
+            self.hub.stop();
+            drop(self.hub);
+            std::fs::remove_dir_all(socket_dir).unwrap();
+            std::fs::remove_dir_all(self.dir).unwrap();
+        }
+    }
+
+    fn approved_value(response: agent::protocol::Response, reference: &str) -> String {
+        match response {
+            agent::protocol::Response::Approved(values) => {
+                let (_, value) = values.iter().find(|(r, _)| r == reference).expect("value for the reference");
+                String::from_utf8(value.to_vec()).unwrap()
+            }
+            other => panic!("expected approval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_approved_delivers_value_and_logs_without_it() {
+        let rig = agent_rig("agent-approve", agent::server::REQUEST_TIMEOUT);
+        let client = rig.ask_in_background(&["encra://github.com#password", "encra://github.com#username"]);
+        let info = rig.wait_for_pending();
+        assert_eq!(info.agent, "test-agent");
+        assert!(!info.inline_script);
+
+        decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true).unwrap();
+        let response = client.join().unwrap().unwrap();
+        let (password, username) = match &response {
+            agent::protocol::Response::Approved(_) => (
+                approved_value(client_clone(&response), "encra://github.com#password"),
+                approved_value(client_clone(&response), "encra://github.com#username"),
+            ),
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(password, "gh_p@$$w0rd");
+        assert_eq!(username, "dev@example.com");
+
+        // One decision only: the request is gone.
+        assert!(rig.hub.pending().is_empty());
+        assert!(decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true).is_err());
+
+        let actions = rig.actions();
+        assert!(actions.contains(&"agent_request".into()) && actions.contains(&"agent_approved".into()));
+        // Neither the value nor the login's name is anywhere in the file.
+        let path = rig.dir.join(CURRENT_DATABASE_NAME);
+        let bytes = std::fs::read(&path).unwrap();
+        let contains = |needle: &str| bytes.windows(needle.len()).any(|w| w == needle.as_bytes());
+        assert!(!contains("gh_p@$$w0rd"), "the value must never be written to the vault file");
+        assert!(!contains("github.com"), "login names must not survive in the file, free pages included");
+        rig.finish();
+    }
+
+    /// Responses carry Zeroizing buffers and are not Clone; rebuild one for reading.
+    fn client_clone(response: &agent::protocol::Response) -> agent::protocol::Response {
+        match response {
+            agent::protocol::Response::Approved(values) => agent::protocol::Response::Approved(
+                values.iter().map(|(r, v)| (r.clone(), zeroize::Zeroizing::new(v.to_vec()))).collect(),
+            ),
+            agent::protocol::Response::Denied => agent::protocol::Response::Denied,
+            agent::protocol::Response::Error(m) => agent::protocol::Response::Error(m.clone()),
+        }
+    }
+
+    #[test]
+    fn test_agent_request_denied_sealed_timed_out_or_abandoned_gets_nothing() {
+        // Denied.
+        let rig = agent_rig("agent-deny", agent::server::REQUEST_TIMEOUT);
+        let client = rig.ask_in_background(&["encra://github.com"]);
+        let info = rig.wait_for_pending();
+        decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, false).unwrap();
+        assert!(matches!(client.join().unwrap().unwrap(), agent::protocol::Response::Denied));
+        assert!(rig.actions().contains(&"agent_denied".into()));
+
+        // Sealed while waiting: cancelled, nothing sent.
+        let client = rig.ask_in_background(&["encra://github.com"]);
+        rig.wait_for_pending();
+        rig.hub.cancel_all("the vault was sealed");
+        assert!(matches!(client.join().unwrap().unwrap(), agent::protocol::Response::Error(m) if m == "the vault was sealed"));
+        assert!(rig.hub.pending().is_empty());
+
+        // The caller hangs up before an answer.
+        {
+            use std::io::Write;
+            let mut stream = std::os::unix::net::UnixStream::connect(&rig.socket).unwrap();
+            let request = agent::protocol::Request {
+                agent: "quitter".into(), argv: vec!["/usr/bin/env".into()], executable: "/usr/bin/env".into(),
+                cwd: "/private/tmp".into(), references: vec!["encra://github.com".into()],
+            };
+            agent::protocol::write_request(&mut stream, &request).unwrap();
+            stream.flush().unwrap();
+            rig.wait_for_pending();
+        }
+        for _ in 0..100 {
+            if rig.hub.pending().is_empty() { break; }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(rig.hub.pending().is_empty(), "an abandoned request must be dropped");
+        assert!(rig.actions().contains(&"agent_cancelled".into()));
+        rig.finish();
+
+        // Nobody answers in time.
+        let rig = agent_rig("agent-timeout", std::time::Duration::from_millis(300));
+        let client = rig.ask_in_background(&["encra://github.com"]);
+        assert!(matches!(client.join().unwrap().unwrap(), agent::protocol::Response::Error(m) if m == "no answer in time"));
+        assert!(rig.actions().contains(&"agent_timeout".into()));
+        rig.finish();
+    }
+
+    #[test]
+    fn test_agent_references_resolve_exactly_or_not_at_all() {
+        let rig = agent_rig("agent-refs", agent::server::REQUEST_TIMEOUT);
+        {
+            let db = rig.db.lock().unwrap();
+            use agent::refs::{login_id, parse, Target};
+            assert_eq!(parse("encra://github.com").unwrap().field, CopyField::Password);
+            assert_eq!(parse("encra://id/c2#url").unwrap().target, Target::Id("c2".into()));
+            assert!(parse("encra://#password").is_err());
+            assert!(parse("https://github.com").is_err());
+            assert_eq!(login_id(&db, &rig.dek, &Target::Name("aws".into())).unwrap(), "c2");
+            assert!(login_id(&db, &rig.dek, &Target::Name("GitHub.com".into())).is_err(), "names match exactly");
+            assert!(login_id(&db, &rig.dek, &Target::Name("nope".into())).is_err());
+
+            // Two logins with the same name: refused, and the id form still works.
+            let sealed = fields::seal(&rig.dek, "credentials", "c3", "service", "aws").unwrap();
+            let password = fields::seal(&rig.dek, "credentials", "c3", "password_encrypted", "second").unwrap();
+            db.execute("INSERT INTO credentials (id, service, username, password_encrypted) VALUES ('c3', ?1, '', ?2)", [&sealed, &password]).unwrap();
+            assert!(login_id(&db, &rig.dek, &Target::Name("aws".into())).unwrap_err().contains("2 logins"));
+            assert_eq!(agent::refs::resolve(&db, &rig.dek, "encra://id/c3").unwrap().1.as_str(), "second");
+        }
+
+        // An approval that cannot resolve sends an error, never a partial set.
+        let client = rig.ask_in_background(&["encra://github.com", "encra://aws"]);
+        let info = rig.wait_for_pending();
+        assert!(decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true).is_err());
+        assert!(matches!(client.join().unwrap().unwrap(), agent::protocol::Response::Error(_)));
+        rig.finish();
+    }
+
+    #[test]
+    fn test_agent_server_refuses_malformed_requests_and_a_second_instance() {
+        let rig = agent_rig("agent-malformed", agent::server::REQUEST_TIMEOUT);
+        // Garbage instead of a frame: an error back, and nothing queued.
+        {
+            use std::io::{Read, Write};
+            let mut stream = std::os::unix::net::UnixStream::connect(&rig.socket).unwrap();
+            stream.write_all(b"GET / HTTP/1.1\r\n\r\n").unwrap();
+            let mut reply = Vec::new();
+            stream.read_to_end(&mut reply).unwrap();
+            assert!(!reply.is_empty());
+        }
+        // A request with no references, or a bad one, is refused up front.
+        for references in [vec![], vec!["encra://github.com#pin".to_string()]] {
+            let request = agent::protocol::Request {
+                agent: "x".into(), argv: vec!["/usr/bin/env".into()], executable: "/usr/bin/env".into(),
+                cwd: "/private/tmp".into(), references,
+            };
+            assert!(matches!(agent::client::ask(&rig.socket, &request).unwrap(), agent::protocol::Response::Error(_)));
+        }
+        assert!(rig.hub.pending().is_empty());
+
+        // The socket is owner-only, and a second server cannot take over.
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(std::fs::metadata(&rig.socket).unwrap().permissions().mode() & 0o777, 0o600);
+        let other = agent::server::Hub::new(Box::new(|| {}), Box::new(|_, _| {}), agent::server::REQUEST_TIMEOUT);
+        assert!(other.start(rig.socket.parent().unwrap()).is_err());
+        drop(other);
+        rig.finish();
     }
 
     #[test]

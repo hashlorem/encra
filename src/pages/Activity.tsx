@@ -14,6 +14,14 @@ const ACTION_LABELS: Record<string, string> = {
   credential_delete: "Login deleted",
   kdf_upgrade: "Key derivation strengthened",
   safety_copy_deleted: "Safety copy deleted",
+  agent_access: "Agent access",
+  agent_request: "Agent request",
+  agent_approved: "Agent request approved",
+  agent_denied: "Agent request denied",
+  agent_failed: "Agent request failed",
+  agent_cancelled: "Agent request cancelled",
+  agent_timeout: "Agent request expired",
+  agent_refused: "Agent connection refused",
   backup_export: "Backup exported",
   backup_import: "Backup restored",
   recovery: "Recovery code used",
@@ -109,7 +117,7 @@ function Activity() {
             <table className="table">
               <tbody>
                 {day.rows.map(({ entry, time }) => {
-                  const failed = entry.action === "unlock_failed";
+                  const failed = entry.action === "unlock_failed" || entry.action === "agent_refused";
                   return (
                     <tr key={entry.id}>
                       <td className="mono">{time}</td>

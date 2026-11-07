@@ -14,6 +14,7 @@ import {
 } from "../lib/preferences";
 import { describeError } from "../lib/errors";
 import { groupCode } from "../lib/format";
+import type { AgentStatus } from "../lib/types";
 import { useClipboard } from "../lib/useClipboard";
 import { APP_NAME, APP_VERSION } from "../lib/appInfo";
 
@@ -32,6 +33,28 @@ function Settings() {
 
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const [hasSafetyCopy, setHasSafetyCopy] = useState(false);
+  const [agent, setAgent] = useState<AgentStatus | null>(null);
+  const [agentBusy, setAgentBusy] = useState(false);
+  const [agentMsg, setAgentMsg] = useState("");
+
+  useEffect(() => {
+    invoke<AgentStatus>("agent_status").then(setAgent).catch(() => setAgent(null));
+  }, []);
+
+  const toggleAgentAccess = async () => {
+    if (!agent || agentBusy) return;
+    setAgentBusy(true);
+    setAgentMsg("");
+    try {
+      setAgent(await invoke<AgentStatus>("set_agent_access", { enabled: !agent.enabled }));
+    } catch (error) {
+      setAgentMsg(describeError(error, "Couldn’t change agent access."));
+    } finally {
+      setAgentBusy(false);
+    }
+  };
+
+  const linkCommand = agent ? `mkdir -p ~/.local/bin && ln -sf "${agent.binary}" ~/.local/bin/encra` : "";
   const [confirmDeleteCopy, setConfirmDeleteCopy] = useState(false);
   const [deletingCopy, setDeletingCopy] = useState(false);
   const [copyMsg, setCopyMsg] = useState("");
@@ -342,6 +365,38 @@ function Settings() {
               <input type="checkbox" checked={soundEnabled} onChange={toggleSound} />
               Play a sound on unlock and seal
             </label>
+          </div>
+        </section>
+
+        <section aria-labelledby="agent-heading">
+          <div>
+            <h2 id="agent-heading" className="section-title">Agent access</h2>
+            <p className="meta">Off unless you turn it on.</p>
+          </div>
+          <div className="settings-body">
+            <label className="checkbox">
+              <input type="checkbox" checked={agent?.enabled ?? false} onChange={() => void toggleAgentAccess()} disabled={!agent || agentBusy} />
+              Let programs ask for logins with <code className="mono">encra run</code>
+            </label>
+            {agentMsg && <p className="error" role="alert">{agentMsg}</p>}
+            {agent?.enabled && (
+              <>
+                <p className="meta">{agent.listening ? "Listening. Each request asks you first." : "Not listening; turn it off and on again."}</p>
+                <div className="field">
+                  <span className="label">Put it on your PATH</span>
+                  <code className="command">{linkCommand}</code>
+                  <div className="actions">
+                    <button className="btn-text" onClick={() => void copyText(linkCommand, "agent-link")}>
+                      {copiedId === "agent-link" ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                </div>
+                <div className="field">
+                  <span className="label">Then</span>
+                  <code className="command">{"echo 'TOKEN=encra://GitHub#password' > .env\nencra run --env-file .env -- ./deploy.sh"}</code>
+                </div>
+              </>
+            )}
           </div>
         </section>
 

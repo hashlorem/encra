@@ -110,6 +110,24 @@ export interface ChainStatus {
   problem: string | null;
 }
 
+/** A waiting `encra run` request. Never carries a value. */
+export interface AgentRequest {
+  id: string;
+  agent: string;
+  argv: string[];
+  executable: string;
+  cwd: string;
+  references: string[];
+  chain: string[];
+  inline_script: boolean;
+}
+
+export interface AgentStatus {
+  enabled: boolean;
+  listening: boolean;
+  binary: string;
+}
+
 export interface ActivityLog {
   entries: ActivityEntry[];
   chain: ChainStatus;
