@@ -361,9 +361,12 @@ kbd,
 
 /* ---------- Shell ---------- */
 
+/* The window is a fixed frame that never scrolls. Each panel scrolls on its
+   own, and only when its own content is longer than it. */
 .shell {
   display: flex;
-  min-height: 100%;
+  height: 100vh;
+  overflow: hidden;
   transition: opacity 160ms var(--ease);
 }
 
@@ -377,13 +380,12 @@ kbd,
 }
 
 .rail {
-  position: sticky;
-  top: 0;
   display: flex;
   flex: 0 0 216px;
   flex-direction: column;
   gap: 40px;
-  height: 100vh;
+  height: 100%;
+  overflow-y: auto;
   padding: 40px 24px 32px 40px;
 }
 
@@ -437,7 +439,16 @@ kbd,
 .workspace {
   flex: 1 1 auto;
   min-width: 0;
+  height: 100%;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   border-left: 1px solid var(--rule);
+}
+
+/* A two-panel page fills the workspace exactly, so the workspace itself has
+   nothing to scroll and each panel scrolls independently. */
+.view:has(> .split) {
+  height: 100%;
 }
 
 .workspace:focus {
@@ -475,7 +486,7 @@ kbd,
 
 .split {
   display: flex;
-  min-height: 100vh;
+  height: 100%;
 }
 
 .split-list {
@@ -483,6 +494,8 @@ kbd,
   flex: 0 0 340px;
   flex-direction: column;
   gap: 24px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 40px 32px;
   border-right: 1px solid var(--rule);
 }
@@ -498,7 +511,9 @@ kbd,
   position: relative;
   flex: 1 1 auto;
   min-width: 0;
-  overflow: hidden;
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
   padding: 40px 64px 64px 56px;
 }
 
@@ -1193,8 +1208,19 @@ fieldset {
 /* ---------- Narrow windows ---------- */
 
 @media (max-width: 960px) {
+  /* Stacked panels: one scroll for the whole workspace instead. */
+  .view:has(> .split),
+  .split {
+    height: auto;
+  }
+
   .split {
     flex-direction: column;
+  }
+
+  .split-list,
+  .split-main {
+    overflow-y: visible;
   }
 
   .split-list {
@@ -1243,5 +1269,15 @@ fieldset {
 
   .workspace {
     border: 0;
+  }
+
+  /* Paper has no scroll: let the whole case flow onto as many pages as needed. */
+  .shell,
+  .workspace,
+  .view,
+  .split,
+  .split-main {
+    height: auto !important;
+    overflow: visible !important;
   }
 }
