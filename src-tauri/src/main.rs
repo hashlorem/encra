@@ -1219,6 +1219,33 @@ fn reset_master_password(state: tauri::State<AppState>, recovery_code: String, n
 
 // ===== Agent access (encra run) =====
 
+const AGENT_TRAY: &str = "agent";
+const TRAY_IDLE: &[u8] = include_bytes!("../icons/tray/agent.png");
+const TRAY_WAITING: &[u8] = include_bytes!("../icons/tray/agent-waiting.png");
+
+fn show_main_window(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.unminimize();
+        let _ = window.show();
+        let _ = window.set_focus();
+    }
+}
+
+fn show_waiting_in_menu_bar(app: &tauri::AppHandle, waiting: usize) {
+    let Some(tray) = app.tray_by_id(AGENT_TRAY) else { return };
+    let icon = if waiting > 0 { TRAY_WAITING } else { TRAY_IDLE };
+    if let Ok(image) = tauri::image::Image::from_bytes(icon) {
+        let _ = tray.set_icon(Some(image));
+        let _ = tray.set_icon_as_template(true);
+    }
+    let _ = tray.set_title((waiting > 0).then(|| waiting.to_string()));
+    let _ = tray.set_tooltip(Some(match waiting {
+        0 => "Encra: agent access is on".to_string(),
+        1 => "Encra: 1 agent request waiting".to_string(),
+        n => format!("Encra: {n} agent requests waiting"),
+    }));
+}
+
 fn agent_access_enabled(db: &Connection) -> bool {
     db.query_row("SELECT value FROM vault_config WHERE key = 'agent_access'", [], |row| row.get::<_, String>(0))
         .map(|value| value == "on")
@@ -1253,6 +1280,7 @@ fn agent_status(state: tauri::State<AppState>, hub: tauri::State<Arc<agent::serv
 
 #[tauri::command]
 fn set_agent_access(
+    app: tauri::AppHandle,
     state: tauri::State<AppState>,
     hub: tauri::State<Arc<agent::server::Hub>>,
     enabled: bool,
@@ -1269,6 +1297,9 @@ fn set_agent_access(
         [if enabled { "on" } else { "off" }],
     )
     .map_err(|e| e.to_string())?;
+    if let Some(tray) = app.tray_by_id(AGENT_TRAY) {
+        let _ = tray.set_visible(enabled);
+    }
     activity::log_action(&db, "agent_access", if enabled { "agent access turned on" } else { "agent access turned off" });
     seal_log(&db, &key);
     Ok(agent_status_of(&db, &hub))
@@ -1419,15 +1450,15 @@ fn main() {
             let hub = agent::server::Hub::new(
                 Box::new(move |waiting: usize, arrived: bool| {
                     let _ = notify_handle.emit("agent-request", waiting);
+                    show_waiting_in_menu_bar(&notify_handle, waiting);
                     if let Some(window) = notify_handle.get_webview_window("main") {
                         // A count on the Dock icon while anything is waiting.
                         let _ = window.set_badge_count((waiting > 0).then_some(waiting as i64));
+                        // Bounce until you open Encra. No focus stealing: macOS
+                        // never bounces the app in front, and keystrokes meant
+                        // for your terminal must not land in the dialog.
                         if arrived {
-                            // Bounce until answered, and come forward.
                             let _ = window.request_user_attention(Some(tauri::UserAttentionType::Critical));
-                            let _ = window.unminimize();
-                            let _ = window.show();
-                            let _ = window.set_focus();
                         } else if waiting == 0 {
                             let _ = window.request_user_attention(None);
                         }
@@ -1449,6 +1480,24 @@ fn main() {
                 }
             }
             app.manage(hub);
+
+            // Menu-bar icon: there while agent access is on, with a dot and a
+            // count while a request waits. Clicking it opens Encra.
+            let open = tauri::menu::MenuItem::with_id(app, "open", "Open Encra", true, None::<&str>)?;
+            let menu = tauri::menu::Menu::with_items(app, &[&open])?;
+            let tray = tauri::tray::TrayIconBuilder::with_id(AGENT_TRAY)
+                .icon(tauri::image::Image::from_bytes(TRAY_IDLE)?)
+                .icon_as_template(true)
+                .tooltip("Encra: agent access is on")
+                .menu(&menu)
+                .show_menu_on_left_click(true)
+                .on_menu_event(|app, event| {
+                    if event.id() == "open" {
+                        show_main_window(app);
+                    }
+                })
+                .build(app)?;
+            tray.set_visible(enabled)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
