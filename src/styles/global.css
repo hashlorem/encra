@@ -663,26 +663,26 @@ kbd,
   display: flex;
 }
 
+/* The whole print sits inside its half of the window, never cropped: it is
+   as tall as the window allows, or as wide as its half, whichever is less. */
 .lock-art {
-  position: relative;
+  display: grid;
   flex: 1 1 52%;
-  overflow: hidden;
+  place-items: center;
+  min-width: 0;
+  padding: 48px;
 }
 
 .lock-art .print {
-  position: absolute;
-  bottom: -18%;
-  left: -12%;
-  width: 118%;
-  max-width: 820px;
+  width: min(100%, calc((100vh - 180px) * 617 / 791));
   opacity: 0.92;
-  transform: rotate(-9deg);
+  transform: rotate(-6deg);
   transition: transform 200ms var(--ease), opacity 200ms var(--ease);
 }
 
 .lock.is-opening .lock-art .print {
   opacity: 0;
-  transform: rotate(-9deg) translateY(8px);
+  transform: rotate(-6deg) translateY(8px);
 }
 
 .lock-panel {
@@ -1068,7 +1068,7 @@ fieldset {
 }
 
 @keyframes ink-in {
-  from { opacity: 0; transform: rotate(-9deg) scale(1.03); filter: blur(8px); }
+  from { opacity: 0; transform: rotate(-6deg) scale(1.03); filter: blur(8px); }
 }
 
 @keyframes shake {
