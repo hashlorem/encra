@@ -324,11 +324,7 @@ function Vault() {
 
         {loading && <p className="status" role="status">Opening the vault…</p>}
         {!loading && filtered.length === 0 && (
-          <EmptyState
-            message={search ? "Nothing matches that search." : "No logins yet. Add your first one."}
-            actionLabel={search ? undefined : "New login"}
-            onAction={openNew}
-          />
+          <EmptyState message={search ? "Nothing matches that search." : "No logins yet."} />
         )}
 
         <ul className="rows stagger">

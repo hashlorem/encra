@@ -131,11 +131,7 @@ function CommandKB({ onClose }: { onClose: () => void }) {
       {error && <p className="error" role="alert">{error}</p>}
       {loading && <p className="status" role="status">Loading commands…</p>}
       {!loading && filtered.length === 0 && (
-        <EmptyState
-          message={isFiltering ? "Nothing matches that search." : "No commands saved yet."}
-          actionLabel={isFiltering ? undefined : "Add command"}
-          onAction={() => setShowForm(true)}
-        />
+        <EmptyState message={isFiltering ? "Nothing matches that search." : "No commands saved yet."} />
       )}
 
       <ol className="entries stagger">
