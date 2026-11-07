@@ -45,7 +45,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
         setPassword("");
         open();
       } else {
-        setError("That isn’t the master password. This attempt was logged.");
+        setError("Wrong password.");
       }
     } catch (err) {
       setError(describeError(err, "Could not unlock the vault."));
@@ -58,11 +58,11 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
     if (busy || !recoveryCode || !newPassword) return;
     setError("");
     if (newPassword.length < MIN_MASTER_PASSWORD_CHARS) {
-      setError(`The new master password needs at least ${MIN_MASTER_PASSWORD_CHARS} characters.`);
+      setError(`At least ${MIN_MASTER_PASSWORD_CHARS} characters.`);
       return;
     }
     if (newPassword !== confirmPassword) {
-      setError("The two new passwords don’t match.");
+      setError("Passwords don’t match.");
       return;
     }
     setBusy(true);
@@ -74,7 +74,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
         setConfirmPassword("");
         open();
       } else {
-        setError("That recovery code isn’t valid, or it has already been used.");
+        setError("Invalid or already used.");
       }
     } catch (err) {
       setError(describeError(err, "Could not reset the master password."));
@@ -97,7 +97,6 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
     <div className={`lock${opening ? " is-opening" : ""}`}>
       <div className="lock-art">
         <Print kind="whorl" />
-        <p className="lock-caption">Fig. 1. Plain whorl, synthetic.</p>
       </div>
 
       <main className="lock-panel">
@@ -113,9 +112,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
           >
             <div>
               <h1 className="title-xl">Sealed.</h1>
-              <p className="lead">
-                {lockedAt ? `Locked at ${formatTime(lockedAt)}.` : "Enter your master password to open the vault."}
-              </p>
+              {lockedAt && <p className="lead">Since {formatTime(lockedAt)}</p>}
             </div>
             <div className="field">
               <label className="label" htmlFor="master-password">Master password</label>
@@ -141,7 +138,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
                 {busy ? "Checking…" : "Unlock"}
               </button>
               <button type="button" className="btn-text" onClick={() => switchMode("recover")}>
-                Use a recovery code instead
+                Forgot it?
               </button>
             </div>
           </form>
@@ -155,7 +152,6 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
           >
             <div>
               <h1 className="title-xl">Recover.</h1>
-              <p className="lead">Each recovery code works once. Using one sets a new master password.</p>
             </div>
             <div className="field">
               <label className="label" htmlFor="recovery-code">Recovery code</label>
@@ -180,7 +176,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
               />
             </div>
             <div className="field">
-              <label className="label" htmlFor="confirm-password">Type it again</label>
+              <label className="label" htmlFor="confirm-password">Again</label>
               <input
                 id="confirm-password"
                 className="input input-secret"
@@ -193,19 +189,16 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
             </div>
             <div className="actions">
               <button className="btn" type="submit" disabled={busy || !recoveryCode || !newPassword || !confirmPassword}>
-                {busy ? "Re-keying…" : "Set password and unlock"}
+                {busy ? "Resetting…" : "Reset and unlock"}
               </button>
               <button type="button" className="btn-text" onClick={() => switchMode("unlock")}>
-                Back to master password
+                Back
               </button>
             </div>
           </form>
         )}
 
-        <div className="lock-foot">
-          <span>Decrypted on this machine. Nothing is sent anywhere.</span>
-          <span className="mono">{APP_VERSION}</span>
-        </div>
+        <span className="lock-foot">{APP_VERSION}</span>
       </main>
     </div>
   );

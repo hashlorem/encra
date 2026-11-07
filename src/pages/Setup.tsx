@@ -9,11 +9,11 @@ const MIN_CHARS = 12;
 
 function strength(password: string): { level: number; words: string } {
   const length = password.length;
-  if (length === 0) return { level: 0, words: `At least ${MIN_CHARS} characters.` };
-  if (length < MIN_CHARS) return { level: 1, words: `Too short. ${length} of ${MIN_CHARS} characters.` };
-  if (length < 16) return { level: 2, words: `Acceptable. ${length} characters.` };
-  if (length < 20) return { level: 3, words: `Good. ${length} characters.` };
-  return { level: 4, words: `Strong. ${length} characters.` };
+  if (length === 0) return { level: 0, words: `${MIN_CHARS} minimum` };
+  if (length < MIN_CHARS) return { level: 1, words: `${length} of ${MIN_CHARS}` };
+  if (length < 16) return { level: 2, words: `${length} characters` };
+  if (length < 20) return { level: 3, words: `${length} characters` };
+  return { level: 4, words: `${length} characters` };
 }
 
 interface SetupProps {
@@ -39,7 +39,7 @@ function Setup({ onDone }: SetupProps) {
     try {
       setCodes(await invoke<string[]>("generate_recovery_codes"));
     } catch (err) {
-      setError(describeError(err, "Could not make recovery codes. You can try again, or make them later in Settings."));
+      setError(describeError(err, "Couldn’t make recovery codes."));
     }
   };
 
@@ -54,7 +54,7 @@ function Setup({ onDone }: SetupProps) {
       setStep(2);
       await loadCodes();
     } catch (err) {
-      setError(describeError(err, "Could not create the vault."));
+      setError(describeError(err, "Couldn’t create the vault."));
     } finally {
       setBusy(false);
     }
@@ -65,7 +65,7 @@ function Setup({ onDone }: SetupProps) {
       <Print kind="arch" className="setup-watermark" />
       <div className="setup-top">
         <Wordmark />
-        <span className="meta">Step {step} of 2</span>
+        <span className="meta">{step} of 2</span>
       </div>
 
       {step === 1 ? (
@@ -76,13 +76,7 @@ function Setup({ onDone }: SetupProps) {
             void create();
           }}
         >
-          <div className="notebook-head">
-            <h1 className="title-xl">Start a vault.</h1>
-            <p className="lead">
-              Pick the one password that opens everything else. Encra can’t reset it for you, so pick
-              something you’ll remember and don’t use anywhere else.
-            </p>
-          </div>
+          <h1 className="title-xl">New vault.</h1>
 
           <div className="field">
             <label className="label" htmlFor="new-master">Master password</label>
@@ -102,7 +96,7 @@ function Setup({ onDone }: SetupProps) {
           </div>
 
           <div className="field">
-            <label className="label" htmlFor="confirm-master">Type it again</label>
+            <label className="label" htmlFor="confirm-master">Again</label>
             <input
               id="confirm-master"
               className="input input-secret"
@@ -111,30 +105,22 @@ function Setup({ onDone }: SetupProps) {
               onChange={(event) => setConfirm(event.target.value)}
               autoComplete="new-password"
             />
-            {confirm && <span className="meta">{matches ? "Matches." : "Doesn’t match yet."}</span>}
+            {confirm && !matches && <span className="meta">Doesn’t match</span>}
           </div>
-
-          <p className="lead">
-            <strong>After this,</strong> you’ll get eight recovery codes. Each one works once. Print them
-            or write them down, and keep them away from this computer.
-          </p>
 
           {error && <p className="error" role="alert">{error}</p>}
 
           <div className="actions">
             <button className="btn" type="submit" disabled={!canContinue}>
-              {busy ? "Creating…" : "Continue"}
+              {busy ? "Creating…" : "Create vault"}
             </button>
           </div>
         </form>
       ) : (
         <div className="setup-body">
           <div className="notebook-head">
-            <h1 className="title-xl">Save these.</h1>
-            <p className="lead">
-              If you ever forget the master password, one of these codes lets you set a new one. This is
-              the only time they’re shown.
-            </p>
+            <h1 className="title-xl">Recovery codes.</h1>
+            <p className="lead">Shown once. Each works once.</p>
           </div>
 
           {codes ? (
@@ -144,7 +130,7 @@ function Setup({ onDone }: SetupProps) {
               ))}
             </ol>
           ) : (
-            !error && <p className="status" role="status">Making codes…</p>
+            !error && <p className="status" role="status">Generating…</p>
           )}
 
           {error && <p className="error" role="alert">{error}</p>}
@@ -152,16 +138,16 @@ function Setup({ onDone }: SetupProps) {
           <div className="actions">
             {codes ? (
               <>
-                <button className="btn" onClick={onDone}>I’ve saved them</button>
+                <button className="btn" onClick={onDone}>Done</button>
                 <button className="btn-text" onClick={() => void copyText(codes.join("\n"), "codes")}>
-                  {copiedId === "codes" ? "Copied" : "Copy all"}
+                  {copiedId === "codes" ? "Copied" : "Copy"}
                 </button>
               </>
             ) : (
               error && (
                 <>
                   <button className="btn" onClick={() => void loadCodes()}>Try again</button>
-                  <button className="btn-text" onClick={onDone}>Skip for now</button>
+                  <button className="btn-text" onClick={onDone}>Skip</button>
                 </>
               )
             )}

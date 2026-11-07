@@ -48,6 +48,12 @@ body,
   height: 100%;
 }
 
+/* No elastic bounce: a native window does not rubber-band. */
+html,
+body {
+  overscroll-behavior: none;
+}
+
 body {
   margin: 0;
   background: var(--paper);
@@ -642,9 +648,16 @@ kbd,
 
 /* ---------- Lock and setup ---------- */
 
+/* Lock and setup are pinned to the window, so they can never scroll. */
+.lock,
+.setup {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
 .lock {
   display: flex;
-  min-height: 100vh;
 }
 
 .lock-art {
@@ -669,14 +682,6 @@ kbd,
   transform: rotate(-9deg) translateY(8px);
 }
 
-.lock-caption {
-  position: absolute;
-  top: 40px;
-  left: 48px;
-  font: italic 400 14px/1.4 var(--serif);
-  color: var(--ink-3);
-}
-
 .lock-panel {
   display: flex;
   flex: 1 1 48%;
@@ -698,18 +703,14 @@ kbd,
 }
 
 .lock-foot {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: space-between;
-  gap: 8px 24px;
-  font-size: 13px;
+  align-self: flex-end;
+  font: 400 13px/1 var(--mono);
   color: var(--ink-3);
 }
 
 .setup {
-  position: relative;
-  min-height: 100vh;
-  overflow: hidden;
+  display: flex;
+  flex-direction: column;
 }
 
 .setup-watermark {
@@ -732,9 +733,11 @@ kbd,
   position: relative;
   display: flex;
   flex-direction: column;
-  gap: 40px;
-  max-width: 560px;
-  padding: 64px 64px 96px;
+  gap: 32px;
+  width: 100%;
+  max-width: 520px;
+  margin: auto 0;
+  padding: 0 64px 64px;
 }
 
 .strength {
@@ -1060,12 +1063,9 @@ fieldset {
     padding: 32px;
   }
 
-  .lock {
-    flex-direction: column;
-  }
-
+  /* Too narrow for the print beside the form: drop the print. */
   .lock-art {
-    min-height: 320px;
+    display: none;
   }
 
   .lock-panel {
