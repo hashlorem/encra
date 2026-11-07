@@ -25,6 +25,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
   const [opening, setOpening] = useState(false);
+  const [shaking, setShaking] = useState(false);
 
   const [recoveryCode, setRecoveryCode] = useState("");
   const [newPassword, setNewPassword] = useState("");
@@ -46,6 +47,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
         open();
       } else {
         setError("Wrong password.");
+        setShaking(true);
       }
     } catch (err) {
       setError(describeError(err, "Could not unlock the vault."));
@@ -104,7 +106,8 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
 
         {mode === "unlock" ? (
           <form
-            className="lock-body"
+            key="unlock"
+            className="lock-body stagger"
             onSubmit={(event) => {
               event.preventDefault();
               void unlock();
@@ -116,7 +119,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
             </div>
             <div className="field">
               <label className="label" htmlFor="master-password">Master password</label>
-              <div className="input-row">
+              <div className={`input-row${shaking ? " shake" : ""}`} onAnimationEnd={() => setShaking(false)}>
                 <input
                   id="master-password"
                   className="input input-secret"
@@ -131,7 +134,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
                   {showPassword ? "Hide" : "Show"}
                 </button>
               </div>
-              {error && <p className="error" role="alert">{error}</p>}
+              {error && <p key={error} className="error" role="alert">{error}</p>}
             </div>
             <div className="actions">
               <button className="btn" type="submit" disabled={busy || !password}>
@@ -144,7 +147,8 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
           </form>
         ) : (
           <form
-            className="lock-body"
+            key="recover"
+            className="lock-body stagger"
             onSubmit={(event) => {
               event.preventDefault();
               void recover();
@@ -185,7 +189,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
                 onChange={(event) => setConfirmPassword(event.target.value)}
                 autoComplete="new-password"
               />
-              {error && <p className="error" role="alert">{error}</p>}
+              {error && <p key={error} className="error" role="alert">{error}</p>}
             </div>
             <div className="actions">
               <button className="btn" type="submit" disabled={busy || !recoveryCode || !newPassword || !confirmPassword}>

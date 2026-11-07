@@ -27,6 +27,11 @@ const REVEAL_MS = 30_000;
 
 type Breach = { state: "checking" } | { state: "done"; count: number } | { state: "failed" };
 
+/** "Copy" that crossfades to "Copied" and back. */
+function CopyLabel({ done }: { done: boolean }) {
+  return <span key={done ? "done" : "idle"} className="fade">{done ? "Copied" : "Copy"}</span>;
+}
+
 /** Subscribes to the shared tick so only this line re-renders every second. */
 const TotpCountdown = memo(function TotpCountdown() {
   const remaining = useTotpRemaining();
@@ -326,7 +331,7 @@ function Vault() {
           />
         )}
 
-        <ul className="rows">
+        <ul className="rows stagger">
           {filtered.map((c) => {
             const result = breaches[c.id];
             const breached = result?.state === "done" && result.count > 0;
@@ -357,7 +362,7 @@ function Vault() {
         {error && <p className="error" role="alert">{error}</p>}
 
         {detail && profile && (
-          <article className="record" aria-labelledby="record-title">
+          <article key={detail.id} className="record stagger" aria-labelledby="record-title">
             <Print kind="arch" className="record-watermark" />
             <header className="record-head">
               <p className="meta">Added {formatDate(detail.created_at)}</p>
@@ -370,14 +375,14 @@ function Vault() {
             <dl className="facts">
               <dt>Password</dt>
               <dd>
-                <span className={`fact-value secret${revealed !== null ? " is-revealed" : ""}`}>
+                <span key={revealed !== null ? "shown" : "hidden"} className={`fact-value secret fade${revealed !== null ? " is-revealed" : ""}`}>
                   {revealed !== null ? revealed : "•".repeat(Math.min(Math.max(profile.length, 8), 24))}
                 </span>
                 <button className="btn-text" onClick={() => void reveal()} disabled={profile.length === 0}>
                   {revealed !== null ? "Hide" : "Show"}
                 </button>
                 <button className="btn-text" onClick={() => void copy("password")} disabled={profile.length === 0}>
-                  {copied("password") ? "Copied" : "Copy"}
+                  <CopyLabel done={copied("password")} />
                 </button>
               </dd>
 
@@ -385,10 +390,10 @@ function Vault() {
               <dd>
                 {detail.has_totp && totp ? (
                   <>
-                    <span className="otp">{totp.code.replace(/^(\d{3})(\d{3})$/, "$1 $2")}</span>
+                    <span key={totp.code} className="otp fade">{totp.code.replace(/^(\d{3})(\d{3})$/, "$1 $2")}</span>
                     <span className="fact-value"><TotpCountdown /></span>
                     <button className="btn-text" onClick={() => void copy("totp")}>
-                      {copied("totp") ? "Copied" : "Copy"}
+                      <CopyLabel done={copied("totp")} />
                     </button>
                     <button className="btn-danger" onClick={() => void removeTotp()}>Remove</button>
                   </>
@@ -408,7 +413,7 @@ function Vault() {
                   <dd>
                     <span className="fact-value">{detail.username}</span>
                     <button className="btn-text" onClick={() => void copy("username")}>
-                      {copied("username") ? "Copied" : "Copy"}
+                      <CopyLabel done={copied("username")} />
                     </button>
                   </dd>
                 </>
@@ -420,7 +425,7 @@ function Vault() {
                   <dd>
                     <span className="fact-value">{detail.url}</span>
                     <button className="btn-text" onClick={() => void copy("url")}>
-                      {copied("url") ? "Copied" : "Copy"}
+                      <CopyLabel done={copied("url")} />
                     </button>
                   </dd>
                 </>
@@ -434,7 +439,7 @@ function Vault() {
               )}
             </dl>
 
-            <p className="summary">
+            <p key={breach?.state ?? "unchecked"} className="summary fade">
               {describeShape(profile)}{" "}
               {profile.length > 0 && (
                 <>

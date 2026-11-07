@@ -199,7 +199,7 @@ function Journal() {
         {!loadingProjects && projects.length === 0 && (
           <EmptyState message="No cases yet. Open one to start taking notes." />
         )}
-        <ul className="rows">
+        <ul className="rows stagger">
           {projects.map((p) => (
             <li key={p.id}>
               <button className="row" aria-current={p.id === selectedId ? "true" : undefined} onClick={() => setSelectedId(p.id)}>
@@ -217,7 +217,7 @@ function Journal() {
         {error && <p className="error" role="alert">{error}</p>}
 
         {project && (
-          <div className="record">
+          <div key={project.id} className="record rise">
             <header className="notebook-head">
               <p className="meta">{projectMeta}</p>
               <h2 className="title-xl">{project.name}</h2>
@@ -287,7 +287,7 @@ function Journal() {
             {loadingEntries && <p className="status" role="status">Loading notes…</p>}
             {!loadingEntries && ordered.length === 0 && <p className="lead">No entries yet. Write the first one above.</p>}
 
-            <ol className="entries">
+            <ol className="entries stagger">
               {ordered.map((entry) => {
                 const when = parseStored(entry.created_at);
                 return (

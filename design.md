@@ -123,17 +123,30 @@ packages; nothing is fetched at runtime.
 
 ### Motion
 
-Functional only. Every animation confirms a state change.
+Smooth everywhere, down to small details, but never bouncy or springy.
+Changed 7 November 2026 at Stephen's request; this replaces "functional only".
 
-- **Seal:** the workspace fades out over 160ms, then the lock screen is
-  shown. Auto-lock on blur skips the fade.
-- **Unlock:** the print slides 8px and fades as the workspace fades in,
+- **Tokens:** `--dur-fast` 140ms (hover, press), `--dur` 220ms (crossfades,
+  focus lines), `--dur-slow` 360ms (entrances, the strength bar). One easing,
+  `--ease` (`cubic-bezier(0.2, 0, 0, 1)`), a fast start that settles softly.
+- **Entrances:** screens, records and dialogs rise 6px and fade in. Lists
+  stagger 40ms per item, capped at 280ms. The lock print inks in from a blur.
+- **Crossfades:** "Copy" to "Copied", a new one-time code, Show and Hide, the
+  breach sentence, the strength label.
+- **Feedback:** a wrong password shakes the field once. Buttons press to 98%.
+  Text buttons draw their underline in from the left. The Seal print turns
+  slightly on hover.
+- **Fields:** the focus line grows from the left in `--link`, 2px. That line
+  is the focus indicator for text fields.
+- **Seal:** the workspace fades out over 160ms, then the lock screen shows.
+  Lock on blur skips the fade. **Unlock:** the print drifts 8px and fades,
   200ms.
-- **Copy:** the button text reads "Copied" for 1.5s.
-- `prefers-reduced-motion`: all of the above become instant.
+- Entrances use `animation-fill-mode: backwards`, so state classes still
+  apply once an animation ends.
+- `prefers-reduced-motion`: every animation and transition is switched off.
 
-No load animation, no skeletons, no hover transitions beyond a colour
-change.
+No skeleton shimmer, no looping animation, nothing that moves while you are
+reading.
 
 ## Components
 
@@ -164,6 +177,7 @@ change.
 ## Quality Floor
 
 - Visible 2px `--link` focus ring on every interactive element, offset 2px.
+  Text fields use the 2px `--link` focus line instead (see Motion).
 - Text contrast AA minimum, checked with the table above when a token
   changes.
 - Icon-only buttons have an accessible name.

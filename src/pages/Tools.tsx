@@ -35,7 +35,7 @@ function Tools() {
           <p className="lead">Everything here runs on this machine. Nothing is uploaded.</p>
         </div>
       </header>
-      <ul className="tool-list">
+      <ul className="tool-list stagger">
         {TOOLS.map((tool) => (
           <li key={tool.id}>
             <button className="tool-row" onClick={() => setActive(tool.id)}>

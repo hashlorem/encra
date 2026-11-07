@@ -32,6 +32,9 @@
   --sans: "Public Sans", system-ui, sans-serif;
   --mono: "IBM Plex Mono", ui-monospace, monospace;
   --ease: cubic-bezier(0.2, 0, 0, 1);
+  --dur-fast: 140ms;
+  --dur: 220ms;
+  --dur-slow: 360ms;
 }
 
 /* ---------- Base ---------- */
@@ -1043,6 +1046,146 @@ fieldset {
 
 .dialog h2 {
   font: 400 28px/1.15 var(--serif);
+}
+
+/* ---------- Motion ----------
+   Smooth, never bouncy. Entrances use fill-mode "backwards" so that once an
+   animation ends, state classes (like .is-opening) take over normally.
+   Everything here is switched off by prefers-reduced-motion below. */
+
+@keyframes fade {
+  from { opacity: 0; }
+}
+
+@keyframes rise {
+  from { opacity: 0; transform: translateY(6px); }
+}
+
+@keyframes pop {
+  from { opacity: 0; transform: translateY(8px) scale(0.985); }
+}
+
+@keyframes ink-in {
+  from { opacity: 0; transform: rotate(-9deg) scale(1.03); filter: blur(8px); }
+}
+
+@keyframes shake {
+  20% { transform: translateX(-6px); }
+  40% { transform: translateX(5px); }
+  60% { transform: translateX(-3px); }
+  80% { transform: translateX(2px); }
+}
+
+.fade { animation: fade var(--dur) var(--ease) backwards; }
+.rise { animation: rise var(--dur-slow) var(--ease) backwards; }
+.shake { animation: shake 360ms var(--ease); }
+
+.stagger > * { animation: rise var(--dur-slow) var(--ease) backwards; }
+.stagger > :nth-child(2) { animation-delay: 40ms; }
+.stagger > :nth-child(3) { animation-delay: 80ms; }
+.stagger > :nth-child(4) { animation-delay: 120ms; }
+.stagger > :nth-child(5) { animation-delay: 160ms; }
+.stagger > :nth-child(6) { animation-delay: 200ms; }
+.stagger > :nth-child(7) { animation-delay: 240ms; }
+.stagger > :nth-child(n + 8) { animation-delay: 280ms; }
+
+/* Screens arriving */
+.shell { animation: fade var(--dur-slow) var(--ease) backwards; }
+.view { animation: rise var(--dur) var(--ease) backwards; }
+.lock-art .print { animation: ink-in 700ms var(--ease) backwards; }
+.setup-watermark { animation: fade 900ms var(--ease) backwards; }
+.dialog-backdrop { animation: fade var(--dur) var(--ease) backwards; }
+.dialog { animation: pop var(--dur-slow) var(--ease) backwards; }
+
+/* Controls */
+.btn,
+.btn-outline,
+.btn-text,
+.btn-danger,
+.btn-icon,
+.row,
+.rail-nav button,
+.seal,
+.tool-row {
+  transition:
+    background-color var(--dur-fast) var(--ease),
+    background-size var(--dur) var(--ease),
+    color var(--dur-fast) var(--ease),
+    opacity var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.btn:active:not(:disabled),
+.btn-outline:active:not(:disabled),
+.seal:active:not(:disabled) {
+  transform: scale(0.98);
+}
+
+/* Text buttons draw their underline in from the left. */
+.btn-text,
+.btn-danger {
+  background: linear-gradient(currentColor, currentColor) left calc(100% - 8px) / 0% 1px no-repeat;
+}
+
+.btn-text:hover:not(:disabled),
+.btn-danger:hover:not(:disabled) {
+  text-decoration: none;
+  background-size: 100% 1px;
+}
+
+.seal .print {
+  transition: transform var(--dur) var(--ease);
+}
+
+.seal:hover .print {
+  transform: scale(1.08) rotate(-4deg);
+}
+
+/* Fields: the focus line grows from the left in the link colour. It is the
+   focus indicator for text fields (2px, --link), in place of the outline. */
+.input,
+.select,
+.textarea,
+.input-row,
+.search,
+.composer-line {
+  background: linear-gradient(var(--link), var(--link)) left bottom / 0% 2px no-repeat;
+  transition: background-size var(--dur) var(--ease);
+}
+
+.input:focus-visible,
+.select:focus-visible,
+.textarea:focus-visible {
+  outline: none;
+  background-size: 100% 2px;
+}
+
+.input-row:focus-within,
+.search:focus-within,
+.composer-line:focus-within {
+  background-size: 100% 2px;
+}
+
+.input-row .input,
+.search .input,
+.composer-line .input {
+  background: none;
+}
+
+/* Small details */
+.strength-bar span {
+  width: 0;
+  transition: width var(--dur-slow) var(--ease), background-color var(--dur) var(--ease);
+}
+
+.strength-bar[data-level="1"] span {
+  background: var(--danger);
+}
+
+[role="alert"],
+[role="status"],
+.field .meta {
+  animation: rise var(--dur) var(--ease) backwards;
 }
 
 /* ---------- Narrow windows ---------- */

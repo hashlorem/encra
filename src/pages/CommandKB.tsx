@@ -138,7 +138,7 @@ function CommandKB({ onClose }: { onClose: () => void }) {
         />
       )}
 
-      <ol className="entries">
+      <ol className="entries stagger">
         {filtered.map((entry) => (
           <li key={entry.id}>
             <span className="entry-when">{entry.category.replace("_", " ")}</span>

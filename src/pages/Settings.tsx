@@ -203,7 +203,7 @@ function Settings() {
         </div>
       </header>
 
-      <div className="settings">
+      <div className="settings stagger">
         <section aria-labelledby="recovery-heading">
           <div>
             <h2 id="recovery-heading" className="section-title">Recovery codes</h2>
@@ -224,7 +224,7 @@ function Settings() {
             ) : (
               <>
                 <p className="lead">This is the only time these are shown. Write them down or print them now.</p>
-                <ol className="codes">
+                <ol className="codes stagger">
                   {recoveryCodes.map((code) => <li key={code}>{code}</li>)}
                 </ol>
                 <div className="actions">

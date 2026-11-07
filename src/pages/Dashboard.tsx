@@ -204,11 +204,13 @@ function Dashboard({ onLock }: DashboardProps) {
       </aside>
 
       <main className="workspace" ref={contentRef} tabIndex={-1}>
-        {active === "vault" && <Vault />}
-        {active === "journal" && <Journal />}
-        {active === "tools" && <Tools />}
-        {active === "activity" && <Activity />}
-        {active === "settings" && <Settings />}
+        <div key={active} className="view">
+          {active === "vault" && <Vault />}
+          {active === "journal" && <Journal />}
+          {active === "tools" && <Tools />}
+          {active === "activity" && <Activity />}
+          {active === "settings" && <Settings />}
+        </div>
       </main>
     </div>
   );

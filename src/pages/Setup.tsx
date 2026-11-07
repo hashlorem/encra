@@ -70,7 +70,8 @@ function Setup({ onDone }: SetupProps) {
 
       {step === 1 ? (
         <form
-          className="setup-body"
+          key="password"
+          className="setup-body stagger"
           onSubmit={(event) => {
             event.preventDefault();
             void create();
@@ -91,7 +92,7 @@ function Setup({ onDone }: SetupProps) {
             />
             <div className="strength">
               <span className="strength-bar" data-level={level}><span /></span>
-              <span>{words}</span>
+              <span key={words} className="fade">{words}</span>
             </div>
           </div>
 
@@ -117,14 +118,14 @@ function Setup({ onDone }: SetupProps) {
           </div>
         </form>
       ) : (
-        <div className="setup-body">
+        <div key="codes" className="setup-body stagger">
           <div className="notebook-head">
             <h1 className="title-xl">Recovery codes.</h1>
             <p className="lead">Shown once. Each works once.</p>
           </div>
 
           {codes ? (
-            <ol className="codes">
+            <ol className="codes stagger">
               {codes.map((code) => (
                 <li key={code}>{code}</li>
               ))}

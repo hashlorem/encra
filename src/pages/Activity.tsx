@@ -85,7 +85,7 @@ function Activity() {
       {!loading && !error && entries.length === 0 && <EmptyState message="Nothing recorded yet." />}
 
       {days.map((day) => (
-        <section key={day.label} className="day">
+        <section key={day.label} className="day rise">
           <h2 className="section-title">{day.label}</h2>
           <div className="table-scroll">
             <table className="table">
