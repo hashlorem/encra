@@ -4,7 +4,7 @@ use argon2::Argon2;
 use base64::Engine;
 use rand::RngCore;
 use rusqlite::Connection;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Mutex;
@@ -41,19 +41,6 @@ impl Drop for Dek {
 }
 
 // --- Models ---
-
-#[derive(Debug, Serialize, Deserialize, Clone)]
-pub struct Credential {
-    pub id: String,
-    pub service: String,
-    pub username: String,
-    pub password_encrypted: String,
-    pub url: String,
-    pub notes: String,
-    pub created_at: String,
-    pub totp_secret: Option<String>,
-    pub totp_code: Option<String>,
-}
 
 #[derive(Debug, Deserialize)]
 pub struct CredentialInput {

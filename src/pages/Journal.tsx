@@ -1,71 +1,101 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Icon } from "../components/Icon";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { describeError } from "../lib/errors";
+import { formatDate, formatShortDate, formatTime, parseStored } from "../lib/format";
 import type { EntryInput, JournalEntry, Project, ProjectInput } from "../lib/types";
 
-const ENTRY_TYPES = ["recon", "finding", "exploitation", "post_exploit", "note", "remediation"] as const;
-const SEVERITIES = ["critical", "high", "medium", "low", "info"] as const;
+const KINDS: { value: string; label: string }[] = [
+  { value: "note", label: "Note" },
+  { value: "finding", label: "Finding" },
+  { value: "recon", label: "Recon" },
+  { value: "exploitation", label: "Exploitation" },
+  { value: "post_exploit", label: "Post-exploitation" },
+  { value: "remediation", label: "Remediation" },
+];
+const SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
+const STATUS_LABELS: Record<string, string> = {
+  planning: "Planning",
+  in_progress: "In progress",
+  completed: "Closed",
+};
 
 const EMPTY_PROJECT: ProjectInput = { name: "", description: "", target: "", methodology: "" };
-const EMPTY_ENTRY: Omit<EntryInput, "project_id"> = {
-  title: "",
-  content: "",
-  entry_type: "note",
-  severity: "info",
-};
+const EMPTY_ENTRY: Omit<EntryInput, "project_id"> = { title: "", content: "", entry_type: "note", severity: "info" };
+
+function kindLabel(value: string): string {
+  return KINDS.find((kind) => kind.value === value)?.label ?? value;
+}
+
+/** "Finding, high" with only high and critical in the danger colour. */
+function EntryKind({ entry }: { entry: JournalEntry }) {
+  const showSeverity = entry.severity && entry.severity !== "info";
+  const loud = entry.severity === "high" || entry.severity === "critical";
+  return (
+    <span className="meta">
+      {kindLabel(entry.entry_type)}
+      {showSeverity && (
+        <>
+          , <span className={loud ? "sev-high" : undefined}>{entry.severity}</span>
+        </>
+      )}
+    </span>
+  );
+}
 
 function Journal() {
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProject, setSelectedProject] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(null);
   const [entries, setEntries] = useState<JournalEntry[]>([]);
   const [loadingProjects, setLoadingProjects] = useState(true);
   const [loadingEntries, setLoadingEntries] = useState(false);
   const [error, setError] = useState("");
 
   const [showProjectForm, setShowProjectForm] = useState(false);
-  const [showEntryForm, setShowEntryForm] = useState(false);
   const [projectForm, setProjectForm] = useState<ProjectInput>(EMPTY_PROJECT);
-  const [entryForm, setEntryForm] = useState(EMPTY_ENTRY);
   const [savingProject, setSavingProject] = useState(false);
+
+  const [entryForm, setEntryForm] = useState(EMPTY_ENTRY);
   const [savingEntry, setSavingEntry] = useState(false);
 
   const [pendingDeleteProject, setPendingDeleteProject] = useState<Project | null>(null);
   const [pendingDeleteEntry, setPendingDeleteEntry] = useState<JournalEntry | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  // Guards against a slow response for a previously selected project landing
-  // after the user has moved on and overwriting the newer list.
-  const entryRequestRef = useRef(0);
+  // Drops a slow response for a case the user has already left.
+  const entryRequest = useRef(0);
 
-  const loadProjects = useCallback(async () => {
+  const loadProjects = useCallback(async (selectAfter?: string) => {
     try {
       const list = await invoke<Project[]>("get_projects");
       setProjects(list);
       setError("");
+      setSelectedId((current) => {
+        const wanted = selectAfter ?? current;
+        if (wanted && list.some((p) => p.id === wanted)) return wanted;
+        return list[0]?.id ?? null;
+      });
     } catch (err) {
-      setError(describeError(err, "Could not load your engagements."));
+      setError(describeError(err, "Could not load your cases."));
     } finally {
       setLoadingProjects(false);
     }
   }, []);
 
   const loadEntries = useCallback(async (projectId: string) => {
-    const requestId = ++entryRequestRef.current;
+    const request = ++entryRequest.current;
     setLoadingEntries(true);
     try {
       const list = await invoke<JournalEntry[]>("get_entries", { projectId });
-      if (requestId !== entryRequestRef.current) return;
-      setEntries(list);
+      if (request === entryRequest.current) setEntries(list);
     } catch (err) {
-      if (requestId !== entryRequestRef.current) return;
+      if (request !== entryRequest.current) return;
       setEntries([]);
-      setError(describeError(err, "Could not load the entries for that engagement."));
+      setError(describeError(err, "Could not load the notes for that case."));
     } finally {
-      if (requestId === entryRequestRef.current) setLoadingEntries(false);
+      if (request === entryRequest.current) setLoadingEntries(false);
     }
   }, []);
 
@@ -74,26 +104,50 @@ function Journal() {
   }, [loadProjects]);
 
   useEffect(() => {
-    if (selectedProject) void loadEntries(selectedProject);
+    setEntryForm(EMPTY_ENTRY);
+    if (selectedId) void loadEntries(selectedId);
     else setEntries([]);
-  }, [selectedProject, loadEntries]);
+  }, [selectedId, loadEntries]);
+
+  const project = useMemo(() => projects.find((p) => p.id === selectedId) ?? null, [projects, selectedId]);
+
+  // Newest first, like a notebook you read from the top.
+  const ordered = useMemo(
+    () => [...entries].sort((a, b) => (a.created_at < b.created_at ? 1 : -1)),
+    [entries],
+  );
 
   const createProject = async () => {
     if (savingProject) return;
     if (!projectForm.name.trim()) {
-      setError("Enter a project name.");
+      setError("Give the case a name.");
       return;
     }
     setSavingProject(true);
     try {
-      await invoke("create_project", { input: projectForm });
+      const created = await invoke<Project>("create_project", { input: projectForm });
       setProjectForm(EMPTY_PROJECT);
       setShowProjectForm(false);
-      await loadProjects();
+      await loadProjects(created.id);
     } catch (err) {
-      setError(describeError(err, "Could not create that project."));
+      setError(describeError(err, "Could not open that case."));
     } finally {
       setSavingProject(false);
+    }
+  };
+
+  const addEntry = async () => {
+    if (!selectedId || savingEntry) return;
+    if (!entryForm.title.trim()) return;
+    setSavingEntry(true);
+    try {
+      await invoke("add_entry", { input: { ...entryForm, project_id: selectedId } });
+      setEntryForm(EMPTY_ENTRY);
+      await loadEntries(selectedId);
+    } catch (err) {
+      setError(describeError(err, "Could not save that note."));
+    } finally {
+      setSavingEntry(false);
     }
   };
 
@@ -102,33 +156,13 @@ function Journal() {
     setDeleting(true);
     try {
       await invoke("delete_project", { id: pendingDeleteProject.id });
-      if (selectedProject === pendingDeleteProject.id) setSelectedProject(null);
+      setSelectedId(null);
       await loadProjects();
     } catch (err) {
-      setError(describeError(err, "Could not delete that project."));
+      setError(describeError(err, "Could not delete that case."));
     } finally {
       setDeleting(false);
       setPendingDeleteProject(null);
-    }
-  };
-
-  const addEntry = async () => {
-    if (!selectedProject || savingEntry) return;
-    if (!entryForm.title.trim()) {
-      setError("Enter a title for the entry.");
-      return;
-    }
-    setSavingEntry(true);
-    try {
-      await invoke("add_entry", { input: { ...entryForm, project_id: selectedProject } });
-      setEntryForm(EMPTY_ENTRY);
-      setShowEntryForm(false);
-      await loadEntries(selectedProject);
-      await loadProjects();
-    } catch (err) {
-      setError(describeError(err, "Could not save that entry."));
-    } finally {
-      setSavingEntry(false);
     }
   };
 
@@ -137,254 +171,210 @@ function Journal() {
     setDeleting(true);
     try {
       await invoke("delete_entry", { id: pendingDeleteEntry.id });
-      if (selectedProject) await loadEntries(selectedProject);
+      if (selectedId) await loadEntries(selectedId);
     } catch (err) {
-      setError(describeError(err, "Could not delete that entry."));
+      setError(describeError(err, "Could not delete that note."));
     } finally {
       setDeleting(false);
       setPendingDeleteEntry(null);
     }
   };
 
-  const activeProject = useMemo(
-    () => projects.find((project) => project.id === selectedProject) ?? null,
-    [projects, selectedProject],
-  );
-
-  if (selectedProject) {
-    return (
-      <div className="journal-page">
-        <div className="page-header">
-          <div className="page-heading-with-back">
-            <button className="btn-icon" onClick={() => setSelectedProject(null)} aria-label="Back to engagements">
-              <Icon name="arrow-left" size={18} />
-            </button>
-            <div className="page-heading">
-              <span className="eyebrow">Active engagement</span>
-              <h1>{activeProject?.name}</h1>
-              <p>{activeProject?.description || "Assessment notes and findings."}</p>
-            </div>
-          </div>
-          <div className="header-actions">
-            <button className="btn-secondary" onClick={() => window.print()}>
-              <Icon name="download" size={15} />Export PDF
-            </button>
-            <button className="btn-primary" onClick={() => setShowEntryForm(true)}>
-              <Icon name="plus" size={16} />New entry
-            </button>
-          </div>
-        </div>
-
-        {activeProject && (
-          <div className="project-meta">
-            <span><Icon name="network" size={14} />Target <strong>{activeProject.target || "N/A"}</strong></span>
-            <span><Icon name="clipboard" size={14} />Methodology <strong>{activeProject.methodology || "N/A"}</strong></span>
-            <span className={`status-badge status-${activeProject.status}`}>{activeProject.status}</span>
-          </div>
-        )}
-
-        {error && <p className="lock-error" role="alert"><Icon name="x" size={13} />{error}</p>}
-
-        {showEntryForm && (
-          <ModalOverlay onClose={() => setShowEntryForm(false)} labelledBy="entry-form-title">
-            <div className="modal">
-              <div className="modal-heading">
-                <span className="modal-icon"><Icon name="file" size={18} /></span>
-                <div>
-                  <h4 id="entry-form-title">New journal entry</h4>
-                  <p>Document an observation, action, or finding.</p>
-                </div>
-              </div>
-              <label className="field-label" htmlFor="entry-title">Title</label>
-              <input
-                id="entry-title"
-                value={entryForm.title}
-                onChange={(event) => setEntryForm({ ...entryForm, title: event.target.value })}
-                autoFocus
-              />
-              <label className="field-label" htmlFor="entry-content">Content</label>
-              <textarea
-                id="entry-content"
-                value={entryForm.content}
-                onChange={(event) => setEntryForm({ ...entryForm, content: event.target.value })}
-                rows={6}
-              />
-              <div className="form-row">
-                <div>
-                  <label className="field-label" htmlFor="entry-type">Type</label>
-                  <select
-                    id="entry-type"
-                    value={entryForm.entry_type}
-                    onChange={(event) => setEntryForm({ ...entryForm, entry_type: event.target.value })}
-                  >
-                    {ENTRY_TYPES.map((type) => (
-                      <option key={type} value={type}>{type.replace("_", " ")}</option>
-                    ))}
-                  </select>
-                </div>
-                <div>
-                  <label className="field-label" htmlFor="entry-severity">Severity</label>
-                  <select
-                    id="entry-severity"
-                    value={entryForm.severity}
-                    onChange={(event) => setEntryForm({ ...entryForm, severity: event.target.value })}
-                  >
-                    {SEVERITIES.map((severity) => (
-                      <option key={severity} value={severity}>{severity}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-              <div className="modal-actions">
-                <button className="btn-secondary" onClick={() => setShowEntryForm(false)} disabled={savingEntry}>Cancel</button>
-                <button className="btn-primary" onClick={() => void addEntry()} disabled={savingEntry}>
-                  <Icon name="check" size={15} />{savingEntry ? "Saving…" : "Save entry"}
-                </button>
-              </div>
-            </div>
-          </ModalOverlay>
-        )}
-
-        {pendingDeleteEntry && (
-          <ConfirmDialog
-            title="Delete this entry?"
-            message="The entry will be removed from this engagement. This cannot be undone."
-            confirmLabel="Delete entry"
-            busy={deleting}
-            onConfirm={() => void confirmDeleteEntry()}
-            onCancel={() => setPendingDeleteEntry(null)}
-          />
-        )}
-
-        <div className="entry-list">
-          {loadingEntries && <p className="inline-message" role="status">Loading entries…</p>}
-          {!loadingEntries && entries.length === 0 && (
-            <EmptyState prompt="$ cat journal/*.md" output="no entries recorded" />
-          )}
-          {entries.map((entry) => (
-            <div key={entry.id} className="entry-card">
-              <div className="entry-header">
-                <span className={`entry-type-badge severity-${entry.severity}`}>
-                  {entry.entry_type.replace("_", " ")} · {entry.severity}
-                </span>
-                <span className="entry-date">{entry.created_at}</span>
-              </div>
-              <h4>{entry.title}</h4>
-              <pre className="entry-content">{entry.content}</pre>
-              <button className="btn-soft btn-danger" onClick={() => setPendingDeleteEntry(entry)}>
-                <Icon name="trash" size={14} />Delete
-              </button>
-            </div>
-          ))}
-        </div>
-      </div>
-    );
-  }
+  const projectMeta = project
+    ? [
+        `Opened ${formatDate(project.created_at)}`,
+        STATUS_LABELS[project.status] ?? project.status,
+        `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`,
+      ].join(" · ")
+    : "";
 
   return (
-    <div className="journal-page">
-      <div className="page-header">
-        <div className="page-heading">
-          <span className="eyebrow">Engagement memory</span>
-          <h1>Field journal</h1>
-          <p>Keep targets, methodology, evidence, and findings organized by engagement.</p>
+    <div className="split">
+      <section className="split-list" aria-label="Cases">
+        <div className="split-list-head">
+          <h1 className="title-l">Cases</h1>
+          <button className="btn-outline" onClick={() => setShowProjectForm(true)}>Open a case</button>
         </div>
-        <button className="btn-primary" onClick={() => setShowProjectForm(true)}>
-          <Icon name="plus" size={16} />New project
-        </button>
-      </div>
-
-      {error && <p className="lock-error" role="alert"><Icon name="x" size={13} />{error}</p>}
-
-      {showProjectForm && (
-        <ModalOverlay onClose={() => setShowProjectForm(false)} labelledBy="project-form-title">
-          <div className="modal">
-            <div className="modal-heading">
-              <span className="modal-icon"><Icon name="folder" size={18} /></span>
-              <div>
-                <h4 id="project-form-title">New project</h4>
-                <p>Create a workspace for an engagement.</p>
-              </div>
-            </div>
-            <label className="field-label" htmlFor="project-name">Project name</label>
-            <input
-              id="project-name"
-              value={projectForm.name}
-              onChange={(event) => setProjectForm({ ...projectForm, name: event.target.value })}
-              autoFocus
-            />
-            <label className="field-label" htmlFor="project-target">Target</label>
-            <input
-              id="project-target"
-              value={projectForm.target}
-              onChange={(event) => setProjectForm({ ...projectForm, target: event.target.value })}
-              placeholder="192.168.1.0/24"
-            />
-            <label className="field-label" htmlFor="project-methodology">Methodology</label>
-            <input
-              id="project-methodology"
-              value={projectForm.methodology}
-              onChange={(event) => setProjectForm({ ...projectForm, methodology: event.target.value })}
-              placeholder="OSSTMM, PTES"
-            />
-            <label className="field-label" htmlFor="project-description">Description</label>
-            <textarea
-              id="project-description"
-              value={projectForm.description}
-              onChange={(event) => setProjectForm({ ...projectForm, description: event.target.value })}
-            />
-            <div className="modal-actions">
-              <button className="btn-secondary" onClick={() => setShowProjectForm(false)} disabled={savingProject}>Cancel</button>
-              <button className="btn-primary" onClick={() => void createProject()} disabled={savingProject}>
-                <Icon name="check" size={15} />{savingProject ? "Creating…" : "Create project"}
+        {loadingProjects && <p className="status" role="status">Loading cases…</p>}
+        {!loadingProjects && projects.length === 0 && (
+          <EmptyState message="No cases yet. Open one to start taking notes." />
+        )}
+        <ul className="rows">
+          {projects.map((p) => (
+            <li key={p.id}>
+              <button className="row" aria-current={p.id === selectedId ? "true" : undefined} onClick={() => setSelectedId(p.id)}>
+                <span className="row-copy">
+                  <span className="row-name">{p.name}</span>
+                  <span className="meta">{STATUS_LABELS[p.status] ?? p.status}</span>
+                </span>
               </button>
+            </li>
+          ))}
+        </ul>
+      </section>
+
+      <div className="split-main">
+        {error && <p className="error" role="alert">{error}</p>}
+
+        {project && (
+          <div className="record">
+            <header className="notebook-head">
+              <p className="meta">{projectMeta}</p>
+              <h2 className="title-xl">{project.name}</h2>
+              {project.description && <p className="lead">{project.description}</p>}
+              {(project.target || project.methodology) && (
+                <p className="meta">
+                  {[project.target && `Scope: ${project.target}`, project.methodology && `Method: ${project.methodology}`]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </p>
+              )}
+            </header>
+
+            <form
+              className="composer"
+              onSubmit={(event) => {
+                event.preventDefault();
+                void addEntry();
+              }}
+            >
+              <div className="composer-line">
+                <label className="sr-only" htmlFor="entry-title">New entry</label>
+                <input
+                  id="entry-title"
+                  className="input"
+                  placeholder="What did you find?"
+                  value={entryForm.title}
+                  onChange={(event) => setEntryForm({ ...entryForm, title: event.target.value })}
+                />
+                <label className="inline-select">
+                  Kind
+                  <select value={entryForm.entry_type} onChange={(event) => setEntryForm({ ...entryForm, entry_type: event.target.value })}>
+                    {KINDS.map((kind) => <option key={kind.value} value={kind.value}>{kind.label}</option>)}
+                  </select>
+                </label>
+                <label className="inline-select">
+                  Severity
+                  <select value={entryForm.severity} onChange={(event) => setEntryForm({ ...entryForm, severity: event.target.value })}>
+                    {SEVERITIES.map((severity) => <option key={severity} value={severity}>{severity}</option>)}
+                  </select>
+                </label>
+              </div>
+              {entryForm.title && (
+                <>
+                  <label className="sr-only" htmlFor="entry-content">Details</label>
+                  <textarea
+                    id="entry-content"
+                    className="textarea"
+                    placeholder="Details, indicators, hashes. ⌘↵ saves."
+                    value={entryForm.content}
+                    onChange={(event) => setEntryForm({ ...entryForm, content: event.target.value })}
+                    onKeyDown={(event) => {
+                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                        event.preventDefault();
+                        void addEntry();
+                      }
+                    }}
+                  />
+                  <div className="actions">
+                    <button className="btn" type="submit" disabled={savingEntry}>{savingEntry ? "Saving…" : "Add entry"}</button>
+                    <button className="btn-text" type="button" onClick={() => setEntryForm(EMPTY_ENTRY)}>Discard</button>
+                  </div>
+                </>
+              )}
+            </form>
+
+            {loadingEntries && <p className="status" role="status">Loading notes…</p>}
+            {!loadingEntries && ordered.length === 0 && <p className="lead">No entries yet. Write the first one above.</p>}
+
+            <ol className="entries">
+              {ordered.map((entry) => {
+                const when = parseStored(entry.created_at);
+                return (
+                  <li key={entry.id}>
+                    <span className="entry-when">
+                      {when ? <>{formatShortDate(when)}<br />{formatTime(when)}</> : entry.created_at}
+                    </span>
+                    <div className="entry-body">
+                      <h3 className="entry-title">{entry.title}</h3>
+                      <EntryKind entry={entry} />
+                      {entry.content && <p className="entry-text">{entry.content}</p>}
+                      <div className="actions no-print">
+                        <button className="btn-danger" onClick={() => setPendingDeleteEntry(entry)}>Delete</button>
+                      </div>
+                    </div>
+                  </li>
+                );
+              })}
+            </ol>
+
+            <div className="actions no-print">
+              <button className="btn-outline" onClick={() => window.print()}>Print case</button>
+              <button className="btn-danger" onClick={() => setPendingDeleteProject(project)}>Delete case</button>
             </div>
           </div>
+        )}
+      </div>
+
+      {showProjectForm && (
+        <ModalOverlay onClose={() => setShowProjectForm(false)} labelledBy="case-form-title">
+          <form
+            className="dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void createProject();
+            }}
+          >
+            <h2 id="case-form-title">Open a case</h2>
+            <div className="field">
+              <label className="label" htmlFor="case-name">Name</label>
+              <input id="case-name" className="input" value={projectForm.name} autoFocus
+                onChange={(event) => setProjectForm({ ...projectForm, name: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="case-description">What happened</label>
+              <textarea id="case-description" className="textarea" value={projectForm.description}
+                onChange={(event) => setProjectForm({ ...projectForm, description: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="case-target">Scope</label>
+              <input id="case-target" className="input" value={projectForm.target} placeholder="A mailbox, a host, 10.0.2.0/24"
+                onChange={(event) => setProjectForm({ ...projectForm, target: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="case-method">Method</label>
+              <input id="case-method" className="input" value={projectForm.methodology} placeholder="PICERL, PTES"
+                onChange={(event) => setProjectForm({ ...projectForm, methodology: event.target.value })} />
+            </div>
+            <div className="actions">
+              <button className="btn" type="submit" disabled={savingProject}>{savingProject ? "Opening…" : "Open case"}</button>
+              <button className="btn-text" type="button" onClick={() => setShowProjectForm(false)} disabled={savingProject}>Cancel</button>
+            </div>
+          </form>
         </ModalOverlay>
       )}
 
       {pendingDeleteProject && (
         <ConfirmDialog
           title={`Delete ${pendingDeleteProject.name}?`}
-          message="The project and every journal entry inside it will be removed. This cannot be undone."
-          confirmLabel="Delete project"
+          message="The case and every entry in it are removed. This can’t be undone."
+          confirmLabel="Delete case"
           busy={deleting}
           onConfirm={() => void confirmDeleteProject()}
           onCancel={() => setPendingDeleteProject(null)}
         />
       )}
 
-      <div className="project-grid">
-        {loadingProjects && <p className="inline-message" role="status">Loading engagements…</p>}
-        {!loadingProjects && projects.length === 0 && (
-          <EmptyState prompt="$ ls ~/engagements/" output="no projects on record" />
-        )}
-        {projects.map((project) => (
-          // A real button for the primary action instead of a button wrapping
-          // another button, which is invalid and broke keyboard navigation.
-          <div key={project.id} className="project-card">
-            <div className="project-card-header">
-              <span className="project-icon"><Icon name="folder" size={18} /></span>
-              <span className={`status-badge status-${project.status}`}>{project.status}</span>
-            </div>
-            <button className="project-open" onClick={() => setSelectedProject(project.id)}>
-              <span className="project-name">{project.name}</span>
-            </button>
-            <p className="project-target"><Icon name="network" size={13} />{project.target || "Target not set"}</p>
-            <p className="project-desc">{project.description}</p>
-            <div className="project-card-actions">
-              <span className="project-date">{project.updated_at}</span>
-              <button
-                className="btn-icon btn-icon-sm btn-danger"
-                onClick={() => setPendingDeleteProject(project)}
-                aria-label={`Delete ${project.name}`}
-              >
-                <Icon name="trash" size={14} />
-              </button>
-            </div>
-          </div>
-        ))}
-      </div>
+      {pendingDeleteEntry && (
+        <ConfirmDialog
+          title="Delete this entry?"
+          message="It’s removed from the case. This can’t be undone."
+          confirmLabel="Delete entry"
+          busy={deleting}
+          onConfirm={() => void confirmDeleteEntry()}
+          onCancel={() => setPendingDeleteEntry(null)}
+        />
+      )}
     </div>
   );
 }

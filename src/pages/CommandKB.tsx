@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Icon } from "../components/Icon";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
@@ -15,7 +14,7 @@ const CATEGORIES = [
 
 const EMPTY_FORM: KBInput = { title: "", command: "", description: "", tags: "", category: "general" };
 
-function CommandKB({ onClose }: { onClose?: () => void }) {
+function CommandKB({ onClose }: { onClose: () => void }) {
   const [entries, setEntries] = useState<KBEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -27,7 +26,7 @@ function CommandKB({ onClose }: { onClose?: () => void }) {
   const [pendingDelete, setPendingDelete] = useState<KBEntry | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const { copy, copiedId } = useClipboard();
+  const { copyText, copiedId } = useClipboard();
 
   const load = useCallback(async () => {
     try {
@@ -93,165 +92,131 @@ function CommandKB({ onClose }: { onClose?: () => void }) {
 
   const isFiltering = Boolean(search) || catFilter !== "all";
 
+  const copy = async (entry: KBEntry) => {
+    try {
+      await copyText(entry.command, entry.id);
+    } catch (err) {
+      setError(describeError(err, "Could not copy that command."));
+    }
+  };
+
   return (
-    <div className="kb-page">
-      <div className="page-header">
-        <div className="page-heading-with-back">
-          {onClose && (
-            <button className="btn-icon" onClick={onClose} aria-label="Back to toolbox">
-              <Icon name="arrow-left" size={18} />
-            </button>
-          )}
-          <div className="page-heading">
-            <span className="eyebrow">Field reference</span>
-            <h1>Command library</h1>
-            <p>Save the commands you trust and find them when seconds matter.</p>
-          </div>
+    <div className="page">
+      <button className="btn-text back" onClick={onClose}>← Toolbox</button>
+      <header className="page-head">
+        <div>
+          <h1 className="title-l">Command library</h1>
+          <p className="lead">Commands you trust, with notes on when to reach for them.</p>
         </div>
-        <button className="btn-primary" onClick={() => setShowForm(true)}>
-          <Icon name="plus" size={16} />Add command
-        </button>
+        <button className="btn-outline" onClick={() => setShowForm(true)}>Add command</button>
+      </header>
+
+      <div className="actions">
+        <label className="search">
+          <span className="sr-only">Search commands</span>
+          <input className="input" placeholder="Search titles, commands and tags" value={search}
+            onChange={(event) => setSearch(event.target.value)} />
+        </label>
+        <label className="inline-select">
+          Category
+          <select value={catFilter} onChange={(event) => setCatFilter(event.target.value)}>
+            <option value="all">all</option>
+            {CATEGORIES.map((category) => (
+              <option key={category} value={category}>{category.replace("_", " ")}</option>
+            ))}
+          </select>
+        </label>
       </div>
 
-      <div className="kb-toolbar">
-        <div className="search-shell">
-          <Icon name="search" size={17} />
-          <label className="sr-only" htmlFor="kb-search">Search commands</label>
-          <input
-            id="kb-search"
-            className="search-input"
-            placeholder="Search commands, tags, or syntax"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </div>
-        <label className="sr-only" htmlFor="kb-category-filter">Filter by category</label>
-        <select id="kb-category-filter" value={catFilter} onChange={(event) => setCatFilter(event.target.value)}>
-          <option value="all">All categories</option>
-          {CATEGORIES.map((category) => (
-            <option key={category} value={category}>{category.replace("_", " ")}</option>
-          ))}
-        </select>
-      </div>
+      {error && <p className="error" role="alert">{error}</p>}
+      {loading && <p className="status" role="status">Loading commands…</p>}
+      {!loading && filtered.length === 0 && (
+        <EmptyState
+          message={isFiltering ? "Nothing matches that search." : "No commands saved yet."}
+          actionLabel={isFiltering ? undefined : "Add command"}
+          onAction={() => setShowForm(true)}
+        />
+      )}
 
-      {error && <p className="lock-error" role="alert"><Icon name="x" size={13} />{error}</p>}
+      <ol className="entries">
+        {filtered.map((entry) => (
+          <li key={entry.id}>
+            <span className="entry-when">{entry.category.replace("_", " ")}</span>
+            <div className="entry-body">
+              <h2 className="entry-title">{entry.title}</h2>
+              {entry.command && <code className="command">{entry.command}</code>}
+              {entry.description && <p className="entry-text">{entry.description}</p>}
+              {entry.tags && <p className="meta">{entry.tags.split(",").map((tag) => tag.trim()).filter(Boolean).join(", ")}</p>}
+              <div className="actions">
+                {entry.command && (
+                  <button className="btn-text" onClick={() => void copy(entry)}>
+                    {copiedId === entry.id ? "Copied" : "Copy command"}
+                  </button>
+                )}
+                <button className="btn-danger" onClick={() => setPendingDelete(entry)}>Delete</button>
+              </div>
+            </div>
+          </li>
+        ))}
+      </ol>
 
       {showForm && (
         <ModalOverlay onClose={() => setShowForm(false)} labelledBy="kb-form-title">
-          <div className="modal">
-            <div className="modal-heading">
-              <span className="modal-icon"><Icon name="terminal" size={18} /></span>
-              <div>
-                <h4 id="kb-form-title">Add command</h4>
-                <p>Store a reusable command and its operating context.</p>
-              </div>
+          <form
+            className="dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void save();
+            }}
+          >
+            <h2 id="kb-form-title">Add a command</h2>
+            <div className="field">
+              <label className="label" htmlFor="kb-title">Title</label>
+              <input id="kb-title" className="input" value={form.title} autoFocus
+                onChange={(event) => setForm({ ...form, title: event.target.value })} />
             </div>
-            <label className="field-label" htmlFor="kb-title">Title</label>
-            <input
-              id="kb-title"
-              value={form.title}
-              onChange={(event) => setForm({ ...form, title: event.target.value })}
-              placeholder="Python reverse shell"
-              autoFocus
-            />
-            <label className="field-label" htmlFor="kb-command">Command</label>
-            <input
-              id="kb-command"
-              value={form.command}
-              onChange={(event) => setForm({ ...form, command: event.target.value })}
-            />
-            <label className="field-label" htmlFor="kb-description">Description / usage notes</label>
-            <textarea
-              id="kb-description"
-              value={form.description}
-              onChange={(event) => setForm({ ...form, description: event.target.value })}
-            />
-            <label className="field-label" htmlFor="kb-tags">Tags</label>
-            <input
-              id="kb-tags"
-              value={form.tags}
-              onChange={(event) => setForm({ ...form, tags: event.target.value })}
-              placeholder="comma separated"
-            />
-            <label className="field-label" htmlFor="kb-category">Category</label>
-            <select
-              id="kb-category"
-              value={form.category}
-              onChange={(event) => setForm({ ...form, category: event.target.value })}
-            >
-              {CATEGORIES.map((category) => (
-                <option key={category} value={category}>{category.replace("_", " ")}</option>
-              ))}
-            </select>
-            <div className="modal-actions">
-              <button className="btn-secondary" onClick={() => setShowForm(false)} disabled={saving}>Cancel</button>
-              <button className="btn-primary" onClick={() => void save()} disabled={saving}>
-                <Icon name="check" size={15} />{saving ? "Saving…" : "Save command"}
-              </button>
+            <div className="field">
+              <label className="label" htmlFor="kb-command">Command</label>
+              <input id="kb-command" className="input mono" value={form.command}
+                onChange={(event) => setForm({ ...form, command: event.target.value })} />
             </div>
-          </div>
+            <div className="field">
+              <label className="label" htmlFor="kb-description">When to use it</label>
+              <textarea id="kb-description" className="textarea" value={form.description}
+                onChange={(event) => setForm({ ...form, description: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="kb-tags">Tags</label>
+              <input id="kb-tags" className="input" value={form.tags} placeholder="Separated by commas"
+                onChange={(event) => setForm({ ...form, tags: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="kb-category">Category</label>
+              <select id="kb-category" className="select" value={form.category}
+                onChange={(event) => setForm({ ...form, category: event.target.value })}>
+                {CATEGORIES.map((category) => (
+                  <option key={category} value={category}>{category.replace("_", " ")}</option>
+                ))}
+              </select>
+            </div>
+            <div className="actions">
+              <button className="btn" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
+              <button className="btn-text" type="button" onClick={() => setShowForm(false)} disabled={saving}>Cancel</button>
+            </div>
+          </form>
         </ModalOverlay>
       )}
 
       {pendingDelete && (
         <ConfirmDialog
           title={`Delete ${pendingDelete.title}?`}
-          message="This command will be removed from your library. This cannot be undone."
+          message="It’s removed from the library. This can’t be undone."
           confirmLabel="Delete command"
           busy={deleting}
           onConfirm={() => void confirmDelete()}
           onCancel={() => setPendingDelete(null)}
         />
       )}
-
-      <div className="kb-list">
-        {loading && <p className="inline-message" role="status">Loading commands…</p>}
-
-        {!loading && filtered.length === 0 && (
-          <EmptyState
-            prompt={isFiltering ? `grep -i "${search || catFilter}" ~/kb/*` : "ls ~/kb/"}
-            output={isFiltering ? "no matches" : "no commands stored"}
-            actionLabel={isFiltering ? undefined : "add command"}
-            onAction={() => setShowForm(true)}
-          />
-        )}
-
-        {filtered.map((entry) => (
-          <div key={entry.id} className="kb-card">
-            <div className="kb-card-header">
-              <div className="kb-title">
-                <span className="kb-title-icon"><Icon name="command" size={16} /></span>
-                <h4>{entry.title}</h4>
-              </div>
-              <div className="kb-card-meta">
-                <span className="kb-category">{entry.category.replace("_", " ")}</span>
-                <span className="entry-date">{entry.created_at}</span>
-              </div>
-            </div>
-            {entry.command && (
-              <div className="kb-command-row">
-                <code className="kb-command">{entry.command}</code>
-                <button className="btn-soft" onClick={() => void copy(entry.command, entry.id)}>
-                  <Icon name={copiedId === entry.id ? "check" : "copy"} size={14} />
-                  {copiedId === entry.id ? "Copied" : "Copy"}
-                </button>
-              </div>
-            )}
-            {entry.description && <p className="kb-desc">{entry.description}</p>}
-            {entry.tags && (
-              <div className="kb-tags">
-                {/* Index in the key: duplicate tag values would otherwise collide. */}
-                {entry.tags.split(",").map((tag, index) => (
-                  <span key={`${tag.trim()}-${index}`} className="kb-tag">{tag.trim()}</span>
-                ))}
-              </div>
-            )}
-            <button className="btn-soft btn-danger" onClick={() => setPendingDelete(entry)}>
-              <Icon name="trash" size={14} />Delete
-            </button>
-          </div>
-        ))}
-      </div>
     </div>
   );
 }

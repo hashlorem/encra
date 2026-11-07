@@ -83,7 +83,7 @@ export function ModalOverlay({ children, onClose, labelledBy }: ModalOverlayProp
 
   return createPortal(
     <div
-      className="modal-overlay"
+      className="dialog-backdrop"
       ref={overlayRef}
       role="dialog"
       aria-modal="true"

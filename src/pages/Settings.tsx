@@ -1,12 +1,10 @@
-import { useCallback, useState } from "react";
+import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import { useTheme, type Theme } from "../lib/ThemeContext";
-import { Icon } from "../components/Icon";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
-import { EmptyState } from "../components/EmptyState";
 import {
   PREFERENCE_KEYS,
   readBooleanPreference,
@@ -17,9 +15,8 @@ import {
 import { describeError } from "../lib/errors";
 import { useClipboard } from "../lib/useClipboard";
 import { APP_NAME, APP_VERSION } from "../lib/appInfo";
-import type { ActivityEntry } from "../lib/types";
 
-const THEME_OPTIONS: readonly Theme[] = ["dark", "light", "system"];
+const THEME_OPTIONS: readonly Theme[] = ["light", "dark", "system"];
 
 function Settings() {
   const { theme, set: setTheme } = useTheme();
@@ -38,9 +35,6 @@ function Settings() {
   const [reauthError, setReauthError] = useState("");
   const [reauthBusy, setReauthBusy] = useState(false);
 
-  const [activityLog, setActivityLog] = useState<ActivityEntry[]>([]);
-  const [showActivity, setShowActivity] = useState(false);
-  const [activityLoading, setActivityLoading] = useState(false);
 
   const [lockKeybind, setLockKeybind] = useState(
     () => readPreference(PREFERENCE_KEYS.lockKeybind) || "meta+l",
@@ -52,7 +46,7 @@ function Settings() {
     readBooleanPreference(PREFERENCE_KEYS.sound, true),
   );
 
-  const { copy: copyToClipboard, copiedId } = useClipboard({ feedbackMs: 2000 });
+  const { copyText, copiedId } = useClipboard(2000);
 
   const updateLockKeybind = (value: string) => {
     setLockKeybind(value);
@@ -73,20 +67,6 @@ function Settings() {
     writeBooleanPreference(PREFERENCE_KEYS.sound, next);
     window.dispatchEvent(new CustomEvent("encra:settings-changed"));
   };
-
-  const loadActivity = useCallback(async () => {
-    setShowActivity(true);
-    setActivityLoading(true);
-    try {
-      const log = await invoke<ActivityEntry[]>("get_activity_log");
-      setActivityLog(log);
-    } catch (error) {
-      console.error("Unable to load the activity log", error);
-      setActivityLog([]);
-    } finally {
-      setActivityLoading(false);
-    }
-  }, []);
 
   const handleExport = async () => {
     if (exporting) return;
@@ -206,264 +186,183 @@ function Settings() {
 
   const copyAllCodes = () => {
     if (!recoveryCodes) return;
-    void copyToClipboard(recoveryCodes.join("\n"), "recovery-codes");
+    copyText(recoveryCodes.join("\n"), "recovery-codes").catch((error) =>
+      setReauthError(describeError(error, "Could not copy the codes.")),
+    );
   };
 
   // Recovery codes are deliberately NOT auto-hidden: the user only ever sees
   // them once, so expiring the view could lose them permanently.
 
   return (
-    <div className="settings-page">
-      <div className="page-header">
-        <div className="page-heading">
-          <span className="eyebrow">Workspace controls</span>
-          <h1>Settings</h1>
-          <p>Manage recovery, backups, appearance, and your local audit trail.</p>
+    <div className="page">
+      <header className="page-head">
+        <div>
+          <h1 className="title-l">Settings</h1>
+          <p className="lead">Recovery, backups, locking and appearance. Stored on this machine only.</p>
         </div>
+      </header>
+
+      <div className="settings">
+        <section aria-labelledby="recovery-heading">
+          <div>
+            <h2 id="recovery-heading" className="section-title">Recovery codes</h2>
+            <p className="meta">For when the master password is forgotten.</p>
+          </div>
+          <div className="settings-body">
+            {!recoveryCodes ? (
+              <>
+                <p className="lead">
+                  Eight single-use codes, each able to set a new master password. Making new ones cancels any
+                  you saved before.
+                </p>
+                <div className="actions">
+                  <button className="btn-outline" onClick={handleGenerateCodes}>Make new codes</button>
+                </div>
+                {reauthError && !showReauth && <p className="error" role="alert">{reauthError}</p>}
+              </>
+            ) : (
+              <>
+                <p className="lead">This is the only time these are shown. Write them down or print them now.</p>
+                <ol className="codes">
+                  {recoveryCodes.map((code) => <li key={code}>{code}</li>)}
+                </ol>
+                <div className="actions">
+                  <button className="btn" onClick={dismissRecoveryCodes}>I’ve saved them</button>
+                  <button className="btn-text" onClick={copyAllCodes}>
+                    {copiedId === "recovery-codes" ? "Copied" : "Copy all"}
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+        </section>
+
+        <section aria-labelledby="backup-heading">
+          <div>
+            <h2 id="backup-heading" className="section-title">Back up</h2>
+            <p className="meta">An encrypted copy of everything in the vault.</p>
+          </div>
+          <div className="settings-body">
+            <div className="field">
+              <label className="label" htmlFor="backup-password">Backup password</label>
+              <input id="backup-password" className="input input-secret" type="password" autoComplete="new-password"
+                value={backupPassword} onChange={(e) => setBackupPassword(e.target.value)} disabled={exporting} />
+              <span className="meta">At least 8 characters. You’ll need it to restore.</span>
+            </div>
+            <div className="actions">
+              <button className="btn-outline" onClick={() => void handleExport()} disabled={exporting || !backupPassword}>
+                {exporting ? "Exporting…" : "Export backup"}
+              </button>
+              {backupMsg && <span className="status" role="status">{backupMsg}</span>}
+            </div>
+          </div>
+        </section>
+
+        <section aria-labelledby="restore-heading">
+          <div>
+            <h2 id="restore-heading" className="section-title">Restore</h2>
+            <p className="meta">Adds a backup’s entries to this vault.</p>
+          </div>
+          <div className="settings-body">
+            <p className="lead">Works with Encra backups and older Cobrypt or KeyRPT ones. Nothing already here is replaced.</p>
+            <div className="field">
+              <label className="label" htmlFor="import-password">Backup password</label>
+              <input id="import-password" className="input input-secret" type="password" autoComplete="off"
+                value={importPassword} onChange={(e) => setImportPassword(e.target.value)} disabled={importing} />
+            </div>
+            <div className="actions">
+              <button className="btn-outline" onClick={() => void handleImport()} disabled={importing || !importPassword}>
+                {importing ? "Restoring…" : "Choose backup file"}
+              </button>
+              {importMsg && <span className="status" role="status">{importMsg}</span>}
+            </div>
+          </div>
+        </section>
+
+        <section aria-labelledby="locking-heading">
+          <div>
+            <h2 id="locking-heading" className="section-title">Locking</h2>
+            <p className="meta">The vault also seals after 5 idle minutes.</p>
+          </div>
+          <div className="settings-body">
+            <label className="inline-select">
+              Seal shortcut
+              <select value={lockKeybind} onChange={(e) => updateLockKeybind(e.target.value)}>
+                <option value="meta+l">⌘L</option>
+                <option value="meta+shift+l">⌘⇧L</option>
+                <option value="alt+l">⌥L</option>
+                <option value="meta+escape">⌘Esc</option>
+              </select>
+            </label>
+            <label className="checkbox">
+              <input type="checkbox" checked={autoLockOnBlur} onChange={toggleAutoLock} />
+              Seal when I switch to another app
+            </label>
+            <label className="checkbox">
+              <input type="checkbox" checked={soundEnabled} onChange={toggleSound} />
+              Play a sound on unlock and seal
+            </label>
+          </div>
+        </section>
+
+        <section aria-labelledby="appearance-heading">
+          <div>
+            <h2 id="appearance-heading" className="section-title">Appearance</h2>
+          </div>
+          <div className="settings-body">
+            <fieldset className="choice">
+              <legend className="sr-only">Theme</legend>
+              {THEME_OPTIONS.map((option) => (
+                <label key={option} className="checkbox">
+                  <input type="radio" name="theme" checked={theme === option} onChange={() => setTheme(option)} />
+                  {option === "system" ? "Match the system" : option === "light" ? "Light" : "Dark"}
+                </label>
+              ))}
+            </fieldset>
+          </div>
+        </section>
       </div>
+
+      <p className="meta">{APP_NAME} {APP_VERSION}. Local-first; the only network call is the breach check.</p>
 
       {showReauth && (
         <ModalOverlay onClose={closeReauth} labelledBy="reauth-title">
-          <div className="modal">
-            <div className="modal-heading">
-              <span className="modal-icon"><Icon name="lock" size={18} /></span>
-              <div>
-                <h4 id="reauth-title">Confirm master password</h4>
-                <p>Re-enter your password to regenerate recovery codes.</p>
-              </div>
+          <form
+            className="dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void confirmReauth();
+            }}
+          >
+            <h2 id="reauth-title">Confirm it’s you</h2>
+            <p className="lead">Enter the master password to make new recovery codes.</p>
+            <div className="field">
+              <label className="label" htmlFor="reauth-password">Master password</label>
+              <input id="reauth-password" className="input input-secret" type="password" autoComplete="current-password"
+                autoFocus value={reauthPassword} onChange={(e) => setReauthPassword(e.target.value)} />
+              {reauthError && <p className="error" role="alert">{reauthError}</p>}
             </div>
-            <label className="field-label" htmlFor="reauth-password">Master password</label>
-            <input
-              id="reauth-password"
-              type="password"
-              placeholder="Master password"
-              value={reauthPassword}
-              onChange={(e) => setReauthPassword(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && void confirmReauth()}
-              autoComplete="current-password"
-            />
-            {reauthError && <p className="lock-error" role="alert">{reauthError}</p>}
-            <div className="modal-actions">
-              <button className="btn-secondary" onClick={closeReauth} disabled={reauthBusy}>Cancel</button>
-              <button className="btn-primary" onClick={() => void confirmReauth()} disabled={reauthBusy || !reauthPassword}>
-                {reauthBusy ? "Verifying…" : "Confirm"}
+            <div className="actions">
+              <button className="btn" type="submit" disabled={reauthBusy || !reauthPassword}>
+                {reauthBusy ? "Checking…" : "Make codes"}
               </button>
+              <button className="btn-text" type="button" onClick={closeReauth} disabled={reauthBusy}>Cancel</button>
             </div>
-          </div>
+          </form>
         </ModalOverlay>
       )}
 
       {pendingImport && (
         <ConfirmDialog
           title="Restore this backup?"
-          message="The entries in this backup will be added to your current vault. Existing entries are not replaced or removed."
-          confirmLabel="Restore backup"
+          message="Its entries are added to this vault. Nothing already here is replaced or removed."
+          confirmLabel="Restore"
           busy={importing}
           onConfirm={() => void confirmImport()}
           onCancel={cancelImport}
         />
       )}
-
-      {showActivity && (
-        <ModalOverlay onClose={() => setShowActivity(false)} labelledBy="activity-title">
-          <div className="modal modal-wide activity-modal">
-            <div className="modal-heading modal-heading-between">
-              <span className="modal-icon"><Icon name="activity" size={18} /></span>
-              <div>
-                <h4 id="activity-title">Activity log</h4>
-                <p>Recent security events recorded on this device.</p>
-              </div>
-            </div>
-            {activityLoading && <p className="inline-message" role="status">Loading…</p>}
-            {!activityLoading && activityLog.length === 0 && (
-              <EmptyState prompt="$ cat /var/log/encra" output="no activity recorded" />
-            )}
-            {activityLog.map((entry) => (
-              <div key={entry.id} className="activity-row">
-                <span className="activity-dot" />
-                <span className="activity-action">{entry.action}</span>
-                <span className="activity-detail">{entry.detail}</span>
-                <span className="activity-time">{entry.timestamp}</span>
-              </div>
-            ))}
-          </div>
-        </ModalOverlay>
-      )}
-
-      <div className="settings-grid">
-        <div className="settings-section settings-section-featured">
-          <div className="settings-section-heading">
-            <span className="settings-icon"><Icon name="shield" size={19} /></span>
-            <div><h3>Recovery codes</h3><p>Emergency access if you forget your master password.</p></div>
-          </div>
-          {!recoveryCodes ? (
-            <div className="settings-action-row">
-              <div className="settings-assurance"><Icon name="check" size={14} />Eight single-use codes, encrypted independently</div>
-              <button className="btn-primary" onClick={handleGenerateCodes}><Icon name="sparkles" size={15} />Generate codes</button>
-            </div>
-          ) : (
-            <div>
-              <div className="recovery-codes-grid">
-                {recoveryCodes.map((code, index) => (
-                  <code key={code} className="recovery-code">
-                    <span>{String(index + 1).padStart(2, "0")}</span>{code}
-                  </code>
-                ))}
-              </div>
-              <div className="recovery-warning"><Icon name="shield" size={15} /><span>Store these now — this is the only time they are shown.</span></div>
-              <div className="settings-action-row">
-                <button className="btn-secondary" onClick={copyAllCodes}>
-                  <Icon name={copiedId === "recovery-codes" ? "check" : "copy"} size={15} />
-                  {copiedId === "recovery-codes" ? "Copied" : "Copy all"}
-                </button>
-                <button className="btn-secondary" onClick={dismissRecoveryCodes}>I’ve saved them</button>
-              </div>
-            </div>
-          )}
-        </div>
-
-        <div className="settings-section">
-          <div className="settings-section-heading">
-            <span className="settings-icon"><Icon name="download" size={19} /></span>
-            <div><h3>Encrypted backup</h3><p>Export a password-protected copy of your workspace.</p></div>
-          </div>
-          <div className="settings-input-row">
-            <label className="sr-only" htmlFor="backup-password">Backup password</label>
-            <input
-              id="backup-password"
-              className="app-input"
-              type="password"
-              placeholder="Create a backup password"
-              autoComplete="new-password"
-              value={backupPassword}
-              onChange={(e) => setBackupPassword(e.target.value)}
-              disabled={exporting}
-            />
-            <button className="btn-primary" onClick={() => void handleExport()} disabled={exporting || !backupPassword}>
-              <Icon name="download" size={15} />{exporting ? "Exporting…" : "Export"}
-            </button>
-          </div>
-          {backupMsg && <p className="inline-message" role="status">{backupMsg}</p>}
-        </div>
-
-        <div className="settings-section">
-          <div className="settings-section-heading">
-            <span className="settings-icon"><Icon name="upload" size={19} /></span>
-            <div><h3>Restore backup</h3><p>Import an Encra backup, or one made by Cobrypt or KeyRPT.</p></div>
-          </div>
-          <div className="settings-input-row">
-            <label className="sr-only" htmlFor="import-password">Backup password</label>
-            <input
-              id="import-password"
-              className="app-input"
-              type="password"
-              placeholder="Enter the backup password"
-              autoComplete="off"
-              value={importPassword}
-              onChange={(e) => setImportPassword(e.target.value)}
-              disabled={importing}
-            />
-            <button className="btn-secondary" onClick={() => void handleImport()} disabled={importing || !importPassword}>
-              <Icon name="upload" size={15} />{importing ? "Importing…" : "Import"}
-            </button>
-          </div>
-          {importMsg && <p className="inline-message" role="status">{importMsg}</p>}
-        </div>
-
-        <div className="settings-section">
-          <div className="settings-section-heading">
-            <span className="settings-icon"><Icon name="activity" size={19} /></span>
-            <div><h3>Activity log</h3><p>Review security-sensitive actions performed locally.</p></div>
-          </div>
-          <button className="btn-secondary" onClick={() => void loadActivity()}>
-            <Icon name="activity" size={15} />View activity
-          </button>
-        </div>
-
-        <div className="settings-section settings-security-card">
-          <div className="settings-section-heading">
-            <span className="settings-icon"><Icon name="lock" size={19} /></span>
-            <div><h3>Security</h3><p>Lock behavior and session controls.</p></div>
-          </div>
-          <div className="security-controls">
-            <label className="security-control-row">
-              <span className="security-control-copy">
-                <strong>Lock shortcut</strong>
-                <small>Seal the vault from anywhere in the workspace.</small>
-              </span>
-              <select
-                className="security-keybind-select"
-                value={lockKeybind}
-                onChange={(e) => updateLockKeybind(e.target.value)}
-                aria-label="Vault lock keyboard shortcut"
-              >
-                <option value="meta+l">⌘ L</option>
-                <option value="meta+shift+l">⌘ ⇧ L</option>
-                <option value="alt+l">⌥ L</option>
-                <option value="meta+escape">⌘ Esc</option>
-              </select>
-            </label>
-            <div className="security-control-row">
-              <span className="security-control-copy">
-                <strong>Lock on app switch</strong>
-                <small>Seal the vault whenever {APP_NAME} loses focus.</small>
-              </span>
-              <button
-                className={`security-toggle${autoLockOnBlur ? " is-on" : ""}`}
-                onClick={toggleAutoLock}
-                type="button"
-                role="switch"
-                aria-checked={autoLockOnBlur}
-                aria-label="Lock vault when the app loses focus"
-              >
-                <span />
-              </button>
-            </div>
-            <div className="security-control-row">
-              <span className="security-control-copy">
-                <strong>Sound</strong>
-                <small>Play a tone when the vault unlocks or seals.</small>
-              </span>
-              <button
-                className={`security-toggle${soundEnabled ? " is-on" : ""}`}
-                onClick={toggleSound}
-                type="button"
-                role="switch"
-                aria-checked={soundEnabled}
-                aria-label="Play a sound on lock and unlock"
-              >
-                <span />
-              </button>
-            </div>
-          </div>
-        </div>
-
-        <div className="settings-section">
-          <div className="settings-section-heading">
-            <span className="settings-icon"><Icon name={theme === "light" ? "sun" : "moon"} size={19} /></span>
-            <div><h3>Appearance</h3><p>Choose how {APP_NAME} looks on this device.</p></div>
-          </div>
-          <div className="theme-segment" role="group" aria-label="Color theme">
-            {THEME_OPTIONS.map((option) => (
-              <button
-                key={option}
-                className={theme === option ? "active" : ""}
-                onClick={() => setTheme(option)}
-                aria-pressed={theme === option}
-              >
-                <Icon name={option === "dark" ? "moon" : option === "light" ? "sun" : "settings"} size={15} />
-                {option}
-              </button>
-            ))}
-          </div>
-        </div>
-      </div>
-
-      <div className="settings-about">
-        <span>encra {APP_VERSION}</span>
-        <span className="status-dot" />
-        <span>Local-first encrypted security workspace</span>
-      </div>
     </div>
   );
 }

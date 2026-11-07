@@ -1,220 +1,163 @@
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Icon } from "../components/Icon";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
+import { Print } from "../components/Print";
 import { describeError } from "../lib/errors";
-import { useClipboard } from "../lib/useClipboard";
+import { countWord, formatDate, joinWords } from "../lib/format";
+import { useClipboard, type CopyField } from "../lib/useClipboard";
 import {
+  setTotpRolloverHandler,
   startTotpWindow,
   stopTotpWindow,
-  setTotpRolloverHandler,
   useTotpRemaining,
 } from "../lib/totpWindow";
-import type { Credential, CredentialInput } from "../lib/types";
+import type {
+  CredentialDetail,
+  CredentialInput,
+  CredentialSummary,
+  PasswordProfile,
+  TotpCode,
+} from "../lib/types";
 
 const EMPTY_FORM: CredentialInput = { service: "", username: "", password: "", url: "", notes: "" };
-const IS_MAC = /Mac/i.test(navigator.userAgent);
+/** A shown password hides itself again after this long. */
+const REVEAL_MS = 30_000;
 
-interface HibpState {
-  count: number;
-  loading: boolean;
-}
+type Breach = { state: "checking" } | { state: "done"; count: number } | { state: "failed" };
 
-/**
- * Isolated countdown. Subscribes to the shared tick directly so a once-per-second
- * update does not re-render the surrounding credential card.
- */
+/** Subscribes to the shared tick so only this line re-renders every second. */
 const TotpCountdown = memo(function TotpCountdown() {
   const remaining = useTotpRemaining();
-  return (
-    <span className={`totp-timer ${remaining <= 5 ? "totp-expiring" : ""}`}>{remaining}s</span>
-  );
+  return <span className="meta">{remaining} seconds left</span>;
 });
 
-interface CredentialCardProps {
-  credential: Credential;
-  revealed: boolean;
-  hibp?: HibpState;
-  onToggleReveal: (id: string) => void;
-  onCopy: (value: string) => void;
-  onEdit: (credential: Credential) => void;
-  onDelete: (credential: Credential) => void;
-  onCheckHibp: (credential: Credential) => void;
-  onSetupTotp: (id: string) => void;
-  onRemoveTotp: (id: string) => void;
+function describeShape(profile: PasswordProfile): string {
+  if (profile.length === 0) return "No password is stored for this login.";
+  const parts: string[] = [];
+  if (profile.lowercase && profile.uppercase) parts.push("upper- and lowercase letters");
+  else if (profile.lowercase) parts.push("lowercase letters");
+  else if (profile.uppercase) parts.push("capital letters");
+  if (profile.digits) parts.push("numbers");
+  if (profile.symbols) parts.push("symbols");
+  const noun = profile.length === 1 ? "character" : "characters";
+  return parts.length
+    ? `${countWord(profile.length)} ${noun}, with ${joinWords(parts)}.`
+    : `${countWord(profile.length)} ${noun}.`;
 }
 
-const CredentialCard = memo(function CredentialCard({
-  credential,
-  revealed,
-  hibp,
-  onToggleReveal,
-  onCopy,
-  onEdit,
-  onDelete,
-  onCheckHibp,
-  onSetupTotp,
-  onRemoveTotp,
-}: CredentialCardProps) {
-  return (
-    <div className="cred-card">
-      <div className="service-avatar">{credential.service.slice(0, 1).toUpperCase() || "K"}</div>
-      <div className="cred-info">
-        <strong>{credential.service}</strong>
-        <div className="cred-meta">
-          <span className="cred-user"><Icon name="user" size={12} />{credential.username}</span>
-          {credential.url && <span className="cred-url"><Icon name="globe" size={12} />{credential.url}</span>}
-        </div>
-      </div>
-
-      {credential.totp_code ? (
-        <div className="cred-totp">
-          <span className="totp-code">{credential.totp_code}</span>
-          <TotpCountdown />
-          <button
-            className="btn-icon btn-icon-sm"
-            onClick={() => onCopy(credential.totp_code ?? "")}
-            aria-label={`Copy two-factor code for ${credential.service}`}
-          >
-            <Icon name="copy" size={14} />
-          </button>
-          <button
-            className="btn-icon btn-icon-sm btn-danger"
-            onClick={() => onRemoveTotp(credential.id)}
-            aria-label={`Remove two-factor authentication for ${credential.service}`}
-          >
-            <Icon name="x" size={14} />
-          </button>
-        </div>
-      ) : (
-        <div className="cred-totp">
-          <button className="btn-soft" onClick={() => onSetupTotp(credential.id)}>
-            <Icon name="fingerprint" size={14} /> Add 2FA
-          </button>
-        </div>
-      )}
-
-      <div className="cred-password">
-        {/* Read-only text; the adjacent button is the single keyboard-accessible
-            control, so this no longer needs its own click handler. */}
-        <span className="password-text" aria-hidden={!revealed}>
-          {revealed ? credential.password_encrypted : "••••••••"}
-        </span>
-        <button
-          className="btn-icon btn-icon-sm"
-          onClick={() => onToggleReveal(credential.id)}
-          aria-label={`${revealed ? "Hide" : "Reveal"} password for ${credential.service}`}
-        >
-          <Icon name={revealed ? "eye-off" : "eye"} size={14} />
-        </button>
-      </div>
-
-      <div className="cred-actions">
-        <button className="btn-icon" onClick={() => onCopy(credential.password_encrypted)} aria-label={`Copy password for ${credential.service}`}>
-          <Icon name="copy" size={15} />
-        </button>
-        <button className="btn-icon" onClick={() => onEdit(credential)} aria-label={`Edit ${credential.service}`}>
-          <Icon name="settings" size={15} />
-        </button>
-        <button
-          className="btn-icon"
-          onClick={() => onCheckHibp(credential)}
-          disabled={hibp?.loading}
-          aria-label={`Check ${credential.service} for breach exposure`}
-        >
-          {hibp?.loading ? <span className="button-spinner" /> : <Icon name="shield" size={15} />}
-        </button>
-        <button className="btn-icon btn-danger" onClick={() => onDelete(credential)} aria-label={`Delete ${credential.service}`}>
-          <Icon name="trash" size={15} />
-        </button>
-      </div>
-
-      <span className="cred-date">{credential.created_at}</span>
-
-      {hibp && !hibp.loading && (
-        <div className="cred-card-footer">
-          <span className={`hibp-badge ${hibp.count === 0 ? "hibp-safe" : "hibp-pwned"}`}>
-            {hibp.count === -1
-              ? "Breach check unavailable"
-              : hibp.count === 0
-                ? "Not found in breaches"
-                : `Found in ${hibp.count.toLocaleString()} breaches`}
-          </span>
-        </div>
-      )}
-    </div>
-  );
-});
-
 function Vault() {
-  const [credentials, setCredentials] = useState<Credential[]>([]);
+  const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [search, setSearch] = useState("");
+  const [selectedId, setSelectedId] = useState<string | null>(null);
+
+  const [detail, setDetail] = useState<CredentialDetail | null>(null);
+  const [profile, setProfile] = useState<PasswordProfile | null>(null);
+  const [totp, setTotp] = useState<TotpCode | null>(null);
+  const [revealed, setRevealed] = useState<string | null>(null);
+  const [breaches, setBreaches] = useState<Record<string, Breach>>({});
 
   const [showForm, setShowForm] = useState(false);
-  const [editing, setEditing] = useState<Credential | null>(null);
+  const [editing, setEditing] = useState<CredentialDetail | null>(null);
   const [form, setForm] = useState<CredentialInput>(EMPTY_FORM);
   const [saving, setSaving] = useState(false);
 
-  const [search, setSearch] = useState("");
-  const [revealed, setRevealed] = useState<Set<string>>(new Set());
-
-  const [totpSetupId, setTotpSetupId] = useState<string | null>(null);
+  const [totpSetup, setTotpSetup] = useState(false);
   const [totpSecret, setTotpSecret] = useState("");
   const [totpBusy, setTotpBusy] = useState(false);
 
-  const [hibpResults, setHibpResults] = useState<Record<string, HibpState>>({});
-  const [pendingDelete, setPendingDelete] = useState<Credential | null>(null);
+  const [pendingDelete, setPendingDelete] = useState<CredentialDetail | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const { copy } = useClipboard();
+  const { copyField, copiedId } = useClipboard();
+  const searchRef = useRef<HTMLInputElement>(null);
+  const detailRequest = useRef(0);
+  const revealTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const loadCredentials = useCallback(async () => {
+  const loadList = useCallback(async (selectAfter?: string) => {
     try {
-      const creds = await invoke<Credential[]>("get_credentials");
-      setCredentials(creds);
+      const list = await invoke<CredentialSummary[]>("list_credentials");
+      setCredentials(list);
       setError("");
+      setSelectedId((current) => {
+        const wanted = selectAfter ?? current;
+        if (wanted && list.some((c) => c.id === wanted)) return wanted;
+        return list[0]?.id ?? null;
+      });
     } catch (err) {
-      setError(describeError(err, "Could not load your credentials."));
+      setError(describeError(err, "Could not load your logins."));
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    void loadCredentials();
-  }, [loadCredentials]);
+    void loadList();
+  }, [loadList]);
 
-  // Recomputed codes when the 30s window rolls over. Without this the displayed
-  // codes stayed frozen and became wrong as soon as the window turned over.
-  useEffect(() => {
-    setTotpRolloverHandler(() => {
-      void loadCredentials();
-    });
-    return () => setTotpRolloverHandler(null);
-  }, [loadCredentials]);
-
-  useEffect(() => {
-    let cancelled = false;
-    void (async () => {
-      try {
-        const seconds = await invoke<number>("get_totp_remaining");
-        if (!cancelled) startTotpWindow(seconds);
-      } catch {
-        if (!cancelled) startTotpWindow(30);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      stopTotpWindow();
-    };
+  const loadTotp = useCallback(async (id: string) => {
+    try {
+      const code = await invoke<TotpCode | null>("get_totp", { id });
+      setTotp(code);
+      if (code) startTotpWindow(code.remaining);
+    } catch (err) {
+      setTotp(null);
+      setError(describeError(err, "Could not compute the one-time code."));
+    }
   }, []);
 
-  // Cmd/Ctrl+K focuses search.
+  const hide = useCallback(() => {
+    if (revealTimer.current) clearTimeout(revealTimer.current);
+    revealTimer.current = null;
+    setRevealed(null);
+  }, []);
+
+  // Fetch the open record whenever the selection changes. Older responses are
+  // dropped so a slow reply cannot overwrite a newer selection.
   useEffect(() => {
-    const handler = () => document.querySelector<HTMLInputElement>(".search-input")?.focus();
+    hide();
+    setTotp(null);
+    if (!selectedId) {
+      setDetail(null);
+      setProfile(null);
+      return;
+    }
+    const request = ++detailRequest.current;
+    void (async () => {
+      try {
+        const [nextDetail, nextProfile] = await Promise.all([
+          invoke<CredentialDetail>("get_credential", { id: selectedId }),
+          invoke<PasswordProfile>("describe_password", { id: selectedId }),
+        ]);
+        if (request !== detailRequest.current) return;
+        setDetail(nextDetail);
+        setProfile(nextProfile);
+        if (nextDetail.has_totp) await loadTotp(selectedId);
+      } catch (err) {
+        if (request !== detailRequest.current) return;
+        setError(describeError(err, "Could not open that login."));
+      }
+    })();
+  }, [selectedId, hide, loadTotp]);
+
+  // A new 30-second window means a new code.
+  useEffect(() => {
+    setTotpRolloverHandler(() => {
+      if (selectedId && detail?.has_totp) void loadTotp(selectedId);
+    });
+    return () => setTotpRolloverHandler(null);
+  }, [selectedId, detail?.has_totp, loadTotp]);
+
+  useEffect(() => () => {
+    stopTotpWindow();
+    if (revealTimer.current) clearTimeout(revealTimer.current);
+  }, []);
+
+  useEffect(() => {
+    const handler = () => searchRef.current?.focus();
     window.addEventListener("encra:search-focus", handler);
     return () => window.removeEventListener("encra:search-focus", handler);
   }, []);
@@ -223,90 +166,101 @@ function Vault() {
     const query = search.trim().toLowerCase();
     if (!query) return credentials;
     return credentials.filter(
-      (credential) =>
-        credential.service.toLowerCase().includes(query) ||
-        credential.username.toLowerCase().includes(query),
+      (c) => c.service.toLowerCase().includes(query) || c.username.toLowerCase().includes(query),
     );
   }, [credentials, search]);
 
-  const resetForm = useCallback(() => {
+  const reveal = async () => {
+    if (!selectedId) return;
+    if (revealed !== null) {
+      hide();
+      return;
+    }
+    try {
+      setRevealed(await invoke<string>("reveal_password", { id: selectedId }));
+      revealTimer.current = setTimeout(hide, REVEAL_MS);
+    } catch (err) {
+      setError(describeError(err, "Could not show that password."));
+    }
+  };
+
+  const copy = async (field: CopyField) => {
+    if (!selectedId) return;
+    try {
+      await copyField(selectedId, field);
+    } catch (err) {
+      setError(describeError(err, "Could not copy that."));
+    }
+  };
+
+  const checkBreach = async () => {
+    const id = selectedId;
+    if (!id) return;
+    setBreaches((previous) => ({ ...previous, [id]: { state: "checking" } }));
+    try {
+      const count = await invoke<number>("check_credential_breach", { id });
+      setBreaches((previous) => ({ ...previous, [id]: { state: "done", count } }));
+    } catch {
+      setBreaches((previous) => ({ ...previous, [id]: { state: "failed" } }));
+    }
+  };
+
+  const openNew = () => {
+    setEditing(null);
+    setForm(EMPTY_FORM);
+    setShowForm(true);
+  };
+
+  const openEdit = () => {
+    if (!detail) return;
+    setEditing(detail);
+    // A blank password means "keep the current one" on the backend.
+    setForm({ service: detail.service, username: detail.username, password: "", url: detail.url, notes: detail.notes });
+    setShowForm(true);
+  };
+
+  const closeForm = () => {
+    setShowForm(false);
     setForm(EMPTY_FORM);
     setEditing(null);
-    setShowForm(false);
-  }, []);
+  };
 
   const save = async () => {
     if (saving) return;
     if (!form.service.trim()) {
-      setError("Enter a service name before saving.");
+      setError("Give the login a name before saving.");
       return;
     }
     setSaving(true);
     try {
       if (editing) {
         await invoke("update_credential", { id: editing.id, input: form });
+        closeForm();
+        // Refetch the open record too, since its fields just changed.
+        setSelectedId(null);
+        await loadList(editing.id);
       } else {
-        await invoke("add_credential", { input: form });
+        const id = await invoke<string>("add_credential", { input: form });
+        closeForm();
+        await loadList(id);
       }
-      resetForm();
-      await loadCredentials();
     } catch (err) {
-      setError(describeError(err, "Could not save that credential."));
+      setError(describeError(err, "Could not save that login."));
     } finally {
       setSaving(false);
     }
   };
 
-  const edit = (credential: Credential) => {
-    setEditing(credential);
-    setForm({
-      service: credential.service,
-      username: credential.username,
-      // Blank means "keep the current password" on the backend.
-      password: "",
-      url: credential.url,
-      notes: credential.notes,
-    });
-    setShowForm(true);
-  };
-
-  const confirmDelete = async () => {
-    if (!pendingDelete || deleting) return;
-    setDeleting(true);
-    try {
-      await invoke("delete_credential", { id: pendingDelete.id });
-      await loadCredentials();
-    } catch (err) {
-      setError(describeError(err, "Could not delete that credential."));
-    } finally {
-      setDeleting(false);
-      setPendingDelete(null);
-    }
-  };
-
-  const toggleReveal = (id: string) => {
-    setRevealed((previous) => {
-      const next = new Set(previous);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
-  };
-
-  const handleCopy = (value: string) => {
-    // The shared hook reports failures and cancels a pending wipe from an
-    // earlier copy, which the old inline implementation did not.
-    void copy(value);
-  };
-
-  const setupTotp = async () => {
-    if (!totpSetupId || !totpSecret || totpBusy) return;
+  const saveTotp = async () => {
+    if (!selectedId || !totpSecret || totpBusy) return;
     setTotpBusy(true);
     try {
-      await invoke("setup_totp", { credentialId: totpSetupId, secret: totpSecret });
-      setTotpSetupId(null);
+      await invoke("setup_totp", { credentialId: selectedId, secret: totpSecret });
+      setTotpSetup(false);
       setTotpSecret("");
-      await loadCredentials();
+      const id = selectedId;
+      setSelectedId(null);
+      await loadList(id);
     } catch (err) {
       setError(describeError(err, "Could not save that 2FA secret."));
     } finally {
@@ -314,179 +268,288 @@ function Vault() {
     }
   };
 
-  const removeTotp = async (id: string) => {
+  const removeTotp = async () => {
+    if (!selectedId) return;
     try {
-      await invoke("remove_totp", { credentialId: id });
-      await loadCredentials();
+      await invoke("remove_totp", { credentialId: selectedId });
+      const id = selectedId;
+      setSelectedId(null);
+      await loadList(id);
     } catch (err) {
-      setError(describeError(err, "Could not remove two-factor authentication."));
+      setError(describeError(err, "Could not remove the one-time code."));
     }
   };
 
-  const checkHibp = async (credential: Credential) => {
-    setHibpResults((previous) => ({ ...previous, [credential.id]: { count: 0, loading: true } }));
+  const confirmDelete = async () => {
+    if (!pendingDelete || deleting) return;
+    setDeleting(true);
     try {
-      const count = await invoke<number>("check_hibp", { password: credential.password_encrypted });
-      setHibpResults((previous) => ({ ...previous, [credential.id]: { count, loading: false } }));
-    } catch {
-      setHibpResults((previous) => ({ ...previous, [credential.id]: { count: -1, loading: false } }));
+      await invoke("delete_credential", { id: pendingDelete.id });
+      setSelectedId(null);
+      await loadList();
+    } catch (err) {
+      setError(describeError(err, "Could not delete that login."));
+    } finally {
+      setDeleting(false);
+      setPendingDelete(null);
     }
   };
 
-  const twoFactorCount = useMemo(
-    () => credentials.filter((credential) => credential.totp_code).length,
-    [credentials],
-  );
+  const breach = selectedId ? breaches[selectedId] : undefined;
+  const copied = (field: CopyField) => copiedId === `${selectedId}:${field}`;
 
   return (
-    <div className="vault-page">
-      <div className="page-header">
-        <div className="page-heading">
-          <span className="eyebrow">Encrypted workspace</span>
-          <h1>Credential vault</h1>
-          <p>Manage every login, secret, and verification code from one protected place.</p>
+    <div className="split">
+      <section className="split-list" aria-label="Logins">
+        <div className="split-list-head">
+          <h1 className="title-l">Vault</h1>
+          <button className="btn-outline" onClick={openNew}>New login</button>
         </div>
-        <div className="header-actions">
-          <button className="btn-primary" onClick={() => { resetForm(); setShowForm(true); }}>
-            <Icon name="plus" size={16} /> New credential
-          </button>
-        </div>
-      </div>
-
-      <div className="vault-statusbar">
-        <span className="status-item"><span className="status-label">credentials</span> <span className="status-value">{credentials.length}</span></span>
-        <span className="status-sep">|</span>
-        <span className="status-item"><span className="status-label">2fa</span> <span className="status-value">{twoFactorCount}</span></span>
-        <span className="status-sep">|</span>
-        <span className="status-item"><span className="status-label">state</span> <span className="status-value status-ok">encrypted</span></span>
-        <span className="status-sep">|</span>
-        <span className="status-item"><span className="status-label">search</span> <span className="status-value">{filtered.length} of {credentials.length}</span></span>
-      </div>
-
-      <div className="vault-toolbar">
-        <div className="search-shell">
-          <Icon name="search" size={17} />
-          <label className="sr-only" htmlFor="vault-search">Search credentials</label>
+        <label className="search">
+          <span className="sr-only">Search logins</span>
           <input
-            id="vault-search"
-            type="text"
-            className="search-input"
-            placeholder="Search by service or username"
+            ref={searchRef}
+            className="input"
+            placeholder={`Search ${credentials.length} ${credentials.length === 1 ? "login" : "logins"}`}
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
-          <kbd>{IS_MAC ? "⌘ K" : "Ctrl K"}</kbd>
-        </div>
-        <span className="result-count">{filtered.length} {filtered.length === 1 ? "item" : "items"}</span>
+          <kbd className="meta">⌘K</kbd>
+        </label>
+
+        {loading && <p className="status" role="status">Opening the vault…</p>}
+        {!loading && filtered.length === 0 && (
+          <EmptyState
+            message={search ? "Nothing matches that search." : "No logins yet. Add your first one."}
+            actionLabel={search ? undefined : "New login"}
+            onAction={openNew}
+          />
+        )}
+
+        <ul className="rows">
+          {filtered.map((c) => {
+            const result = breaches[c.id];
+            const breached = result?.state === "done" && result.count > 0;
+            return (
+              <li key={c.id}>
+                <button
+                  className="row"
+                  aria-current={c.id === selectedId ? "true" : undefined}
+                  onClick={() => setSelectedId(c.id)}
+                >
+                  <span className="row-copy">
+                    <span className="row-name">{c.service}</span>
+                    {c.username && <span className="meta">{c.username}</span>}
+                  </span>
+                  {breached ? (
+                    <span className="row-note is-danger">in a breach</span>
+                  ) : (
+                    c.has_totp && <span className="row-note">2FA</span>
+                  )}
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      </section>
+
+      <div className="split-main">
+        {error && <p className="error" role="alert">{error}</p>}
+
+        {detail && profile && (
+          <article className="record" aria-labelledby="record-title">
+            <Print kind="arch" className="record-watermark" />
+            <header className="record-head">
+              <p className="meta">Added {formatDate(detail.created_at)}</p>
+              <h2 id="record-title" className="title-xl">{detail.service}</h2>
+              {(detail.username || detail.url) && (
+                <p className="lead">{[detail.username, detail.url].filter(Boolean).join(" · ")}</p>
+              )}
+            </header>
+
+            <dl className="facts">
+              <dt>Password</dt>
+              <dd>
+                <span className={`fact-value secret${revealed !== null ? " is-revealed" : ""}`}>
+                  {revealed !== null ? revealed : "•".repeat(Math.min(Math.max(profile.length, 8), 24))}
+                </span>
+                <button className="btn-text" onClick={() => void reveal()} disabled={profile.length === 0}>
+                  {revealed !== null ? "Hide" : "Show"}
+                </button>
+                <button className="btn-text" onClick={() => void copy("password")} disabled={profile.length === 0}>
+                  {copied("password") ? "Copied" : "Copy"}
+                </button>
+              </dd>
+
+              <dt>One-time code</dt>
+              <dd>
+                {detail.has_totp && totp ? (
+                  <>
+                    <span className="otp">{totp.code.replace(/^(\d{3})(\d{3})$/, "$1 $2")}</span>
+                    <span className="fact-value"><TotpCountdown /></span>
+                    <button className="btn-text" onClick={() => void copy("totp")}>
+                      {copied("totp") ? "Copied" : "Copy"}
+                    </button>
+                    <button className="btn-danger" onClick={() => void removeTotp()}>Remove</button>
+                  </>
+                ) : (
+                  <>
+                    <span className="fact-value meta">None set up</span>
+                    <button className="btn-text" onClick={() => { setTotpSecret(""); setTotpSetup(true); }}>
+                      Add
+                    </button>
+                  </>
+                )}
+              </dd>
+
+              {detail.username && (
+                <>
+                  <dt>Username</dt>
+                  <dd>
+                    <span className="fact-value">{detail.username}</span>
+                    <button className="btn-text" onClick={() => void copy("username")}>
+                      {copied("username") ? "Copied" : "Copy"}
+                    </button>
+                  </dd>
+                </>
+              )}
+
+              {detail.url && (
+                <>
+                  <dt>Website</dt>
+                  <dd>
+                    <span className="fact-value">{detail.url}</span>
+                    <button className="btn-text" onClick={() => void copy("url")}>
+                      {copied("url") ? "Copied" : "Copy"}
+                    </button>
+                  </dd>
+                </>
+              )}
+
+              {detail.notes && (
+                <>
+                  <dt>Notes</dt>
+                  <dd><span className="fact-value notes">{detail.notes}</span></dd>
+                </>
+              )}
+            </dl>
+
+            <p className="summary">
+              {describeShape(profile)}{" "}
+              {profile.length > 0 && (
+                <>
+                  {!breach && "It hasn’t been checked against known breaches yet. "}
+                  {breach?.state === "checking" && "Checking known breaches… "}
+                  {breach?.state === "failed" && "The breach check couldn’t reach the service. "}
+                  {breach?.state === "done" && breach.count === 0 && "It didn’t turn up in any known breach just now. "}
+                  {breach?.state === "done" && breach.count > 0 && (
+                    <span className="error">
+                      It turned up in {breach.count.toLocaleString()} known breaches. Change it.{" "}
+                    </span>
+                  )}
+                </>
+              )}
+            </p>
+
+            <div className="actions">
+              <button className="btn-outline" onClick={openEdit}>Edit</button>
+              {profile.length > 0 && (
+                <button
+                  className="btn-text"
+                  onClick={() => void checkBreach()}
+                  disabled={breach?.state === "checking"}
+                >
+                  {breach ? "Check breaches again" : "Check breaches"}
+                </button>
+              )}
+              <button className="btn-danger" onClick={() => setPendingDelete(detail)}>Delete login</button>
+            </div>
+            <p className="meta">
+              Breach checks send only the first five characters of the password’s SHA-1 hash to Have I Been Pwned.
+            </p>
+          </article>
+        )}
       </div>
 
-      {error && (
-        <p className="lock-error" role="alert">
-          <Icon name="x" size={13} />{error}
-        </p>
-      )}
-
       {showForm && (
-        <ModalOverlay onClose={resetForm} labelledBy="credential-form-title">
-          <div className="modal">
-            <div className="modal-heading">
-              <span className="modal-icon"><Icon name={editing ? "key" : "plus"} size={18} /></span>
-              <div>
-                <h4 id="credential-form-title">{editing ? "Edit credential" : "Add credential"}</h4>
-                <p>{editing ? "Update the selected vault entry." : "Store a new login in your encrypted vault."}</p>
-              </div>
+        <ModalOverlay onClose={closeForm} labelledBy="login-form-title">
+          <form
+            className="dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void save();
+            }}
+          >
+            <h2 id="login-form-title">{editing ? `Edit ${editing.service}` : "New login"}</h2>
+            <div className="field">
+              <label className="label" htmlFor="login-service">Name</label>
+              <input id="login-service" className="input" value={form.service} autoFocus
+                onChange={(event) => setForm({ ...form, service: event.target.value })} />
             </div>
-            <label className="field-label" htmlFor="credential-service">Service</label>
-            <input id="credential-service" value={form.service} onChange={(event) => setForm({ ...form, service: event.target.value })} autoFocus />
-            <label className="field-label" htmlFor="credential-username">Username</label>
-            <input id="credential-username" value={form.username} onChange={(event) => setForm({ ...form, username: event.target.value })} />
-            <label className="field-label" htmlFor="credential-password">Password</label>
-            <input id="credential-password" type="password" value={form.password} onChange={(event) => setForm({ ...form, password: event.target.value })} />
-            {editing && <span className="form-hint">Leave blank to keep the current password.</span>}
-            <label className="field-label" htmlFor="credential-url">URL (optional)</label>
-            <input id="credential-url" value={form.url} onChange={(event) => setForm({ ...form, url: event.target.value })} />
-            <label className="field-label" htmlFor="credential-notes">Notes (optional)</label>
-            <textarea id="credential-notes" value={form.notes} onChange={(event) => setForm({ ...form, notes: event.target.value })} />
-            <div className="modal-actions">
-              <button className="btn-secondary" onClick={resetForm} disabled={saving}>Cancel</button>
-              <button className="btn-primary" onClick={() => void save()} disabled={saving}>
-                <Icon name="check" size={15} />{saving ? "Saving…" : editing ? "Update credential" : "Save credential"}
-              </button>
+            <div className="field">
+              <label className="label" htmlFor="login-username">Username</label>
+              <input id="login-username" className="input" value={form.username} autoComplete="off"
+                onChange={(event) => setForm({ ...form, username: event.target.value })} />
             </div>
-          </div>
+            <div className="field">
+              <label className="label" htmlFor="login-password">Password</label>
+              <input id="login-password" className="input input-secret" type="password" value={form.password}
+                autoComplete="new-password"
+                onChange={(event) => setForm({ ...form, password: event.target.value })} />
+              {editing && <span className="meta">Leave blank to keep the current password.</span>}
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="login-url">Website</label>
+              <input id="login-url" className="input" value={form.url} autoComplete="off"
+                onChange={(event) => setForm({ ...form, url: event.target.value })} />
+            </div>
+            <div className="field">
+              <label className="label" htmlFor="login-notes">Notes</label>
+              <textarea id="login-notes" className="textarea" value={form.notes}
+                onChange={(event) => setForm({ ...form, notes: event.target.value })} />
+            </div>
+            <div className="actions">
+              <button className="btn" type="submit" disabled={saving}>{saving ? "Saving…" : "Save"}</button>
+              <button className="btn-text" type="button" onClick={closeForm} disabled={saving}>Cancel</button>
+            </div>
+          </form>
         </ModalOverlay>
       )}
 
-      {totpSetupId && (
-        <ModalOverlay onClose={() => setTotpSetupId(null)} labelledBy="totp-setup-title">
-          <div className="modal">
-            <div className="modal-heading">
-              <span className="modal-icon"><Icon name="fingerprint" size={18} /></span>
-              <div>
-                <h4 id="totp-setup-title">Set up two-factor authentication</h4>
-                <p>Add a TOTP secret to generate verification codes here.</p>
-              </div>
+      {totpSetup && (
+        <ModalOverlay onClose={() => setTotpSetup(false)} labelledBy="totp-title">
+          <form
+            className="dialog"
+            onSubmit={(event) => {
+              event.preventDefault();
+              void saveTotp();
+            }}
+          >
+            <h2 id="totp-title">Add a one-time code</h2>
+            <p className="lead">Paste the setup key the service shows next to its QR code. It usually looks like JBSWY3DPEHPK3PXP.</p>
+            <div className="field">
+              <label className="label" htmlFor="totp-secret">Setup key</label>
+              <input id="totp-secret" className="input input-secret" value={totpSecret} autoFocus autoComplete="off"
+                onChange={(event) => setTotpSecret(event.target.value)} />
             </div>
-            <p className="form-hint form-hint-tight">
-              Paste the secret key from the service (usually a base32 string like JBSWY3DPEHPK3PXP).
-            </p>
-            <label className="field-label" htmlFor="totp-secret">TOTP secret</label>
-            <input
-              id="totp-secret"
-              value={totpSecret}
-              onChange={(event) => setTotpSecret(event.target.value)}
-              autoFocus
-              autoComplete="off"
-            />
-            <div className="modal-actions">
-              <button className="btn-secondary" onClick={() => setTotpSetupId(null)} disabled={totpBusy}>Cancel</button>
-              <button className="btn-primary" onClick={() => void setupTotp()} disabled={totpBusy || !totpSecret}>
-                <Icon name="check" size={15} />{totpBusy ? "Saving…" : "Save 2FA"}
-              </button>
+            <div className="actions">
+              <button className="btn" type="submit" disabled={totpBusy || !totpSecret}>{totpBusy ? "Saving…" : "Save"}</button>
+              <button className="btn-text" type="button" onClick={() => setTotpSetup(false)} disabled={totpBusy}>Cancel</button>
             </div>
-          </div>
+          </form>
         </ModalOverlay>
       )}
 
       {pendingDelete && (
         <ConfirmDialog
           title={`Delete ${pendingDelete.service}?`}
-          message="This removes the credential from your vault. This cannot be undone."
-          confirmLabel="Delete credential"
+          message="The login and its one-time code are removed from the vault. This can’t be undone."
+          confirmLabel="Delete login"
           busy={deleting}
           onConfirm={() => void confirmDelete()}
           onCancel={() => setPendingDelete(null)}
         />
       )}
-
-      <div className="cred-list">
-        {loading && <p className="inline-message" role="status">Decrypting your vault…</p>}
-
-        {!loading && filtered.length === 0 && (
-          <EmptyState
-            prompt={search ? `grep -i "${search}" ~/vault/*` : "ls ~/vault/"}
-            output={search ? "no matches" : "no credentials stored"}
-            actionLabel={search ? undefined : "add credential"}
-            onAction={() => setShowForm(true)}
-          />
-        )}
-
-        {filtered.map((credential) => (
-          <CredentialCard
-            key={credential.id}
-            credential={credential}
-            revealed={revealed.has(credential.id)}
-            hibp={hibpResults[credential.id]}
-            onToggleReveal={toggleReveal}
-            onCopy={handleCopy}
-            onEdit={edit}
-            onDelete={setPendingDelete}
-            onCheckHibp={(target) => void checkHibp(target)}
-            onSetupTotp={(id) => { setTotpSetupId(id); setTotpSecret(""); }}
-            onRemoveTotp={(id) => void removeTotp(id)}
-          />
-        ))}
-      </div>
     </div>
   );
 }

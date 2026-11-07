@@ -125,8 +125,8 @@ packages; nothing is fetched at runtime.
 
 Functional only. Every animation confirms a state change.
 
-- **Seal:** the content fades out over 160ms while the print fades in, then
-  the lock screen is shown. Auto-lock and blur-lock skip the animation.
+- **Seal:** the workspace fades out over 160ms, then the lock screen is
+  shown. Auto-lock on blur skips the fade.
 - **Unlock:** the print slides 8px and fades as the workspace fades in,
   200ms.
 - **Copy:** the button text reads "Copied" for 1.5s.

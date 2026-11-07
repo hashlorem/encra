@@ -31,7 +31,7 @@ function resolveTheme(theme: Theme): "dark" | "light" {
  */
 export function applyStoredTheme(): void {
   const stored = readPreference(PREFERENCE_KEYS.theme);
-  const theme = isTheme(stored) ? stored : "dark";
+  const theme = isTheme(stored) ? stored : "light";
   document.documentElement.setAttribute("data-theme", resolveTheme(theme));
 }
 
@@ -48,7 +48,7 @@ const ThemeContext = createContext<ThemeContextValue | null>(null);
 export function ThemeProvider({ children }: { children: ReactNode }) {
   const [theme, setTheme] = useState<Theme>(() => {
     const stored = readPreference(PREFERENCE_KEYS.theme);
-    return isTheme(stored) ? stored : "dark";
+    return isTheme(stored) ? stored : "light";
   });
   const [resolved, setResolved] = useState<"dark" | "light">(() => resolveTheme(theme));
 

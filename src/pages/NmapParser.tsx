@@ -2,7 +2,6 @@ import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { open } from "@tauri-apps/plugin-dialog";
 import { readTextFile } from "@tauri-apps/plugin-fs";
-import { Icon } from "../components/Icon";
 import { describeError } from "../lib/errors";
 import type { NmapScan, Project } from "../lib/types";
 
@@ -16,7 +15,7 @@ interface ProjectOption {
   name: string;
 }
 
-function NmapParser({ onClose }: { onClose?: () => void }) {
+function NmapParser({ onClose }: { onClose: () => void }) {
   const [scan, setScan] = useState<NmapScan | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
@@ -102,7 +101,7 @@ function NmapParser({ onClose }: { onClose?: () => void }) {
   const saveToJournal = async () => {
     if (!scan || !saveProject || saving) return;
     setSaving(true);
-    setSaveMsg("Saving…");
+    setSaveMsg("");
     try {
       const inputs = scan.hosts.map((host) => {
         const openPorts = host.ports.filter((port) => port.state === "open");
@@ -123,9 +122,9 @@ function NmapParser({ onClose }: { onClose?: () => void }) {
 
       // One transactional call: either every host is recorded or none is.
       const saved = await invoke<number>("add_entries", { inputs });
-      setSaveMsg(`Saved ${saved} host${saved === 1 ? "" : "s"} to the journal.`);
+      setSaveMsg(`Filed ${saved} host${saved === 1 ? "" : "s"} into the case.`);
     } catch (err) {
-      setSaveMsg(describeError(err, "Could not save the scan to the journal."));
+      setSaveMsg(describeError(err, "Could not file the hosts. Nothing was saved."));
     } finally {
       setSaving(false);
     }
@@ -133,7 +132,7 @@ function NmapParser({ onClose }: { onClose?: () => void }) {
 
   return (
     <div
-      className="nmap-page"
+      className="page"
       onDragOver={(event) => {
         event.preventDefault();
         setDragOver(true);
@@ -141,110 +140,84 @@ function NmapParser({ onClose }: { onClose?: () => void }) {
       onDragLeave={() => setDragOver(false)}
       onDrop={(event) => void handleDrop(event)}
     >
-      {dragOver && (
-        <div className="drop-overlay">
-          <div className="drop-box"><Icon name="upload" size={28} />Drop XML file here</div>
+      <button className="btn-text back" onClick={onClose}>← Toolbox</button>
+      <header className="page-head">
+        <div>
+          <h1 className="title-l">Nmap parser</h1>
+          <p className="lead">Reads Nmap’s XML output (<span className="mono">-oX</span>) on this machine.</p>
         </div>
-      )}
-
-      <div className="page-header">
-        <div className="page-heading-with-back">
-          {onClose && (
-            <button className="btn-icon" onClick={onClose} aria-label="Back to toolbox">
-              <Icon name="arrow-left" size={18} />
-            </button>
-          )}
-          <div className="page-heading">
-            <span className="eyebrow">Network intelligence</span>
-            <h1>Nmap parser</h1>
-            <p>Turn XML scan output into a readable service inventory.</p>
-          </div>
-        </div>
-      </div>
+        {scan && <button className="btn-outline" onClick={() => void handleFile()} disabled={loading}>Open another file</button>}
+      </header>
 
       {!scan && (
-        <div className="nmap-dropzone">
-          {/* A real button, not a span styled as one, so it is focusable and
-              announced as a control. */}
-          <span className="nmap-drop-icon">
-            {loading ? <span className="button-spinner" /> : <Icon name="upload" size={24} />}
-          </span>
-          <strong>{loading ? "Parsing scan…" : "Drop an Nmap XML file here"}</strong>
-          <span>or choose a file from your device</span>
-          <button className="btn-secondary" onClick={() => void handleFile()} disabled={loading}>
-            <Icon name="folder" size={15} />Browse files
-          </button>
-          <small>XML files only · processed locally</small>
+        <div className={`dropzone${dragOver ? " is-over" : ""}`}>
+          <p className="lead">{loading ? "Reading the scan…" : "Drop an Nmap XML file here, or choose one."}</p>
+          <button className="btn-outline" onClick={() => void handleFile()} disabled={loading}>Choose a file</button>
         </div>
       )}
 
-      {error && (
-        <p className="lock-error page-error" role="alert"><Icon name="x" size={13} />{error}</p>
-      )}
+      {error && <p className="error" role="alert">{error}</p>}
 
       {scan && (
-        <div className="nmap-results">
-          <div className="scan-summary">
-            <span className="scan-file-icon"><Icon name="file" size={18} /></span>
-            <div className="scan-file"><strong>{fileName}</strong><span>Parsed successfully</span></div>
-            <div className="scan-metric"><strong>{scan.total_hosts}</strong><span>Hosts</span></div>
-            <div className="scan-metric"><strong>{scan.total_open_ports}</strong><span>Open ports</span></div>
-            {projects.length > 0 && (
-              <div className="scan-save">
-                <label className="sr-only" htmlFor="scan-project">Save scan to project</label>
-                <select
-                  id="scan-project"
-                  value={saveProject}
-                  onChange={(event) => setSaveProject(event.target.value)}
-                  disabled={saving}
-                >
-                  <option value="">Save to project…</option>
+        <>
+          <p className="summary">
+            <span className="mono">{fileName}</span>: {scan.total_hosts} {scan.total_hosts === 1 ? "host" : "hosts"} with{" "}
+            {scan.total_open_ports} open {scan.total_open_ports === 1 ? "port" : "ports"} between them.
+          </p>
+
+          {projects.length > 0 && (
+            <div className="actions">
+              <label className="inline-select">
+                File the hosts into
+                <select value={saveProject} onChange={(event) => setSaveProject(event.target.value)} disabled={saving}>
+                  <option value="">choose a case</option>
                   {projects.map((project) => (
                     <option key={project.id} value={project.id}>{project.name}</option>
                   ))}
                 </select>
-                <button className="btn-soft" onClick={() => void saveToJournal()} disabled={!saveProject || saving}>
-                  <Icon name="download" size={14} />{saving ? "Saving…" : "Save"}
-                </button>
-              </div>
-            )}
-            <button className="btn-icon" onClick={() => void handleFile()} aria-label="Open another file" disabled={loading}>
-              <Icon name="refresh" size={16} />
-            </button>
-            {saveMsg && <span className="scan-message" role="status">{saveMsg}</span>}
-          </div>
-
-          {scan.hosts.map((host) => (
-            <div key={`${host.ip}-${host.hostname ?? ""}`} className="nmap-host">
-              <div className="host-header">
-                <span className="host-icon"><Icon name="network" size={16} /></span>
-                <strong>{host.ip}</strong>
-                {host.hostname && <span className="host-hostname">{host.hostname}</span>}
-                {host.os && <span className="host-os">{host.os}</span>}
-                <span className="host-port-count">
-                  {host.ports.filter((port) => port.state === "open").length} open
-                </span>
-              </div>
-
-              {host.ports.length > 0 && (
-                <div className="port-table">
-                  <div className="port-table-header">
-                    <span>Port</span><span>Proto</span><span>State</span><span>Service</span><span>Version</span>
-                  </div>
-                  {host.ports.map((port) => (
-                    <div key={`${port.port}-${port.protocol}`} className={`port-row port-${port.state}`}>
-                      <span>{port.port}</span>
-                      <span>{port.protocol}</span>
-                      <span className={`port-state-${port.state}`}>{port.state}</span>
-                      <span>{port.service}</span>
-                      <span className="text-muted">{port.version || "-"}</span>
-                    </div>
-                  ))}
-                </div>
-              )}
+              </label>
+              <button className="btn-outline" onClick={() => void saveToJournal()} disabled={!saveProject || saving}>
+                {saving ? "Filing…" : "File hosts"}
+              </button>
+              {saveMsg && <span className="status" role="status">{saveMsg}</span>}
             </div>
-          ))}
-        </div>
+          )}
+
+          <div>
+            {scan.hosts.map((host) => {
+              const open = host.ports.filter((port) => port.state === "open").length;
+              return (
+                <section key={`${host.ip}-${host.hostname ?? ""}`} className="host">
+                  <div className="host-head">
+                    <h2 className="section-title mono">{host.ip}</h2>
+                    {host.hostname && <span className="meta">{host.hostname}</span>}
+                    {host.os && <span className="meta">{host.os}</span>}
+                    <span className="meta">{open} open</span>
+                  </div>
+                  {host.ports.length > 0 && (
+                    <div className="table-scroll">
+                      <table className="table">
+                        <thead>
+                          <tr><th>Port</th><th>State</th><th>Service</th><th>Version</th></tr>
+                        </thead>
+                        <tbody>
+                          {host.ports.map((port) => (
+                            <tr key={`${port.port}-${port.protocol}`}>
+                              <td className="mono">{port.port}/{port.protocol}</td>
+                              <td>{port.state}</td>
+                              <td>{port.service}</td>
+                              <td>{port.version || "–"}</td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </section>
+              );
+            })}
+          </div>
+        </>
       )}
     </div>
   );

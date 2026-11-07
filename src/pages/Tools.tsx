@@ -1,92 +1,51 @@
 import { lazy, Suspense, useState } from "react";
-import { Icon, type IconName } from "../components/Icon";
 
-// Loaded on demand: the toolbox is not on the startup path, so keeping these
-// out of the initial bundle makes the lock screen and vault lighter.
+// Loaded on demand: the toolbox is not on the startup path.
 const PasswordGenerator = lazy(() => import("./PasswordGenerator"));
 const NmapParser = lazy(() => import("./NmapParser"));
 const CommandKB = lazy(() => import("./CommandKB"));
 
 type ToolId = "pwgen" | "nmap" | "kb";
 
-interface ToolDefinition {
-  id: ToolId;
-  icon: IconName;
-  tone: string;
-  label: string;
-  tag: string;
-  description: string;
-}
-
-const TOOLS: ToolDefinition[] = [
-  { id: "pwgen", icon: "wand", tone: "gold", label: "Password generator", tag: "Crypto", description: "Create cryptographically secure passwords with precise length and character controls." },
-  { id: "nmap", icon: "network", tone: "violet", label: "Nmap parser", tag: "Network", description: "Turn raw Nmap XML into clear, structured hosts, services, and open-port records." },
-  { id: "kb", icon: "terminal", tone: "amber", label: "Command library", tag: "Reference", description: "Keep field-tested commands, payloads, and operational notes close at hand." },
+const TOOLS: { id: ToolId; label: string; description: string }[] = [
+  { id: "pwgen", label: "Password generator", description: "Random passwords from your machine’s secure random source, with the length and characters you choose." },
+  { id: "nmap", label: "Nmap parser", description: "Open an Nmap XML file and read it as hosts and open ports, then file the hosts into a case." },
+  { id: "kb", label: "Command library", description: "Commands you trust, with notes on when to use them." },
 ];
 
 function Tools() {
-  const [activeTool, setActiveTool] = useState<ToolId | null>(null);
+  const [active, setActive] = useState<ToolId | null>(null);
+  const close = () => setActive(null);
 
-  if (activeTool === "pwgen") {
+  if (active) {
     return (
-      <div className="tool-detail">
-        <Suspense fallback={<p className="inline-message" role="status">Loading tool…</p>}>
-          <PasswordGenerator onClose={() => setActiveTool(null)} />
-        </Suspense>
-      </div>
-    );
-  }
-  if (activeTool === "nmap") {
-    return (
-      <div className="tool-detail">
-        <Suspense fallback={<p className="inline-message" role="status">Loading tool…</p>}>
-          <NmapParser onClose={() => setActiveTool(null)} />
-        </Suspense>
-      </div>
-    );
-  }
-  if (activeTool === "kb") {
-    return (
-      <div className="tool-detail">
-        <Suspense fallback={<p className="inline-message" role="status">Loading tool…</p>}>
-          <CommandKB onClose={() => setActiveTool(null)} />
-        </Suspense>
-      </div>
+      <Suspense fallback={<div className="page"><p className="status" role="status">Opening…</p></div>}>
+        {active === "pwgen" && <PasswordGenerator onClose={close} />}
+        {active === "nmap" && <NmapParser onClose={close} />}
+        {active === "kb" && <CommandKB onClose={close} />}
+      </Suspense>
     );
   }
 
   return (
-    <div className="tools-page">
-      <div className="page-header">
-        <div className="page-heading">
-          <span className="eyebrow">Security utilities</span>
-          <h1>Toolbox</h1>
-          <p>Focused instruments for everyday assessment and investigation work.</p>
+    <div className="page">
+      <header className="page-head">
+        <div>
+          <h1 className="title-l">Toolbox</h1>
+          <p className="lead">Everything here runs on this machine. Nothing is uploaded.</p>
         </div>
-      </div>
-      <div className="tool-grid">
+      </header>
+      <ul className="tool-list">
         {TOOLS.map((tool) => (
-          <button
-            key={tool.id}
-            className={`tool-card tool-card-${tool.tone}`}
-            onClick={() => setActiveTool(tool.id)}
-          >
-            <div className="tool-card-top">
-              <span className="tool-icon"><Icon name={tool.icon} size={22} /></span>
-              <span className="tool-tag">{tool.tag}</span>
-            </div>
-            <div className="tool-card-copy">
-              <h3>{tool.label}</h3>
-              <p>{tool.description}</p>
-            </div>
-            <span className="tool-open">Open tool <Icon name="chevron-right" size={16} /></span>
-          </button>
+          <li key={tool.id}>
+            <button className="tool-row" onClick={() => setActive(tool.id)}>
+              <span className="tool-name">{tool.label}</span>
+              <span className="lead">{tool.description}</span>
+              <span className="btn-text" aria-hidden="true">Open</span>
+            </button>
+          </li>
         ))}
-      </div>
-      <div className="toolbox-note">
-        <Icon name="shield" size={16} />
-        <span>All tools process data locally. Nothing is uploaded or retained outside your workspace.</span>
-      </div>
+      </ul>
     </div>
   );
 }

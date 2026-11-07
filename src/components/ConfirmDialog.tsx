@@ -1,4 +1,3 @@
-import { Icon } from "./Icon";
 import { ModalOverlay } from "./ModalOverlay";
 
 interface ConfirmDialogProps {
@@ -10,12 +9,7 @@ interface ConfirmDialogProps {
   onCancel: () => void;
 }
 
-/**
- * Confirmation gate for destructive or irreversible actions.
- *
- * Uses only existing design tokens: `btn-secondary` plus the `btn-danger`
- * colour modifier, so the danger colour stays reserved for destructive intent.
- */
+/** Confirmation gate for destructive or irreversible actions. */
 export function ConfirmDialog({
   title,
   message,
@@ -26,19 +20,14 @@ export function ConfirmDialog({
 }: ConfirmDialogProps) {
   return (
     <ModalOverlay onClose={busy ? () => undefined : onCancel} labelledBy="confirm-dialog-title">
-      <div className="modal">
-        <div className="modal-heading">
-          <span className="modal-icon"><Icon name="trash" size={18} /></span>
-          <div>
-            <h4 id="confirm-dialog-title">{title}</h4>
-            <p>{message}</p>
-          </div>
-        </div>
-        <div className="modal-actions">
-          <button className="btn-secondary" onClick={onCancel} disabled={busy}>
+      <div className="dialog">
+        <h2 id="confirm-dialog-title">{title}</h2>
+        <p className="lead">{message}</p>
+        <div className="actions">
+          <button className="btn-outline" onClick={onCancel} disabled={busy}>
             Cancel
           </button>
-          <button className="btn-secondary btn-danger" onClick={onConfirm} disabled={busy}>
+          <button className="btn-danger" onClick={onConfirm} disabled={busy}>
             {busy ? "Working…" : confirmLabel}
           </button>
         </div>

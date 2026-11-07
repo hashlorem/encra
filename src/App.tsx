@@ -1,8 +1,8 @@
 import { useEffect, useState } from "react";
+import { invoke } from "@tauri-apps/api/core";
 import LockScreen from "./pages/LockScreen";
+import Setup from "./pages/Setup";
 import Dashboard from "./pages/Dashboard";
-import { animateWindowMode } from "./lib/windowGeometry";
-import { wipeClipboardNow } from "./lib/clipboardWipe";
 
 /**
  * Dev-only shortcut that opens the workspace without the vault password.
@@ -14,35 +14,35 @@ import { wipeClipboardNow } from "./lib/clipboardWipe";
 const PREVIEW_UNLOCK =
   import.meta.env.DEV && new URLSearchParams(window.location.search).has("preview");
 
+type Stage = "locked" | "setup" | "open";
+
 function App() {
-  const [unlocked, setUnlocked] = useState(PREVIEW_UNLOCK);
+  // The lock screen renders first, before any database read; a brand-new
+  // vault switches to setup once the status comes back.
+  const [stage, setStage] = useState<Stage>(PREVIEW_UNLOCK ? "open" : "locked");
+  const [lockedAt, setLockedAt] = useState<Date | null>(null);
 
   useEffect(() => {
-    if (!unlocked) document.documentElement.classList.remove("vault-seal-guard");
-  }, [unlocked]);
+    if (PREVIEW_UNLOCK) return;
+    invoke<string>("vault_status")
+      .then((status) => {
+        if (status === "new") setStage("setup");
+      })
+      .catch((error) => console.error("Unable to read the vault status", error));
+  }, []);
 
-  const unlockWorkspace = () => {
-    setUnlocked(true);
-    void animateWindowMode(true);
+  useEffect(() => {
+    if (stage !== "open") document.documentElement.classList.remove("vault-seal-guard");
+  }, [stage]);
+
+  const lock = () => {
+    setLockedAt(new Date());
+    setStage("locked");
   };
 
-  const lockWorkspace = (immediate = false) => {
-    // Every lock path (button, shortcut, idle timer, blur) ends here, so this is
-    // the one place a still-pending copied secret gets wiped.
-    void wipeClipboardNow();
-    setUnlocked(false);
-    void animateWindowMode(false, !immediate);
-  };
-
-  return (
-    <div className="app-root">
-      {!unlocked ? (
-        <LockScreen onUnlock={unlockWorkspace} />
-      ) : (
-        <Dashboard onLock={lockWorkspace} />
-      )}
-    </div>
-  );
+  if (stage === "setup") return <Setup onDone={() => setStage("open")} />;
+  if (stage === "locked") return <LockScreen lockedAt={lockedAt} onUnlock={() => setStage("open")} />;
+  return <Dashboard onLock={lock} />;
 }
 
 export default App;

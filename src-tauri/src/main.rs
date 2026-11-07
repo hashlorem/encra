@@ -8,13 +8,17 @@ mod nmap;
 mod kb;
 mod backup;
 mod activity;
+mod clipboard;
+mod credentials;
 mod util;
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use tauri::Manager;
 use util::{check_field, constant_time_eq, fill_random, uuid_v4, wipe_strings};
-use vault::{AppState, Credential, CredentialInput, Dek};
+use clipboard::ClipboardGuard;
+use credentials::{CopyField, CredentialDetail, CredentialSummary, PasswordProfile, TotpCode};
+use vault::{AppState, CredentialInput, Dek};
 use rusqlite::Connection;
 use base64::Engine;
 use zeroize::Zeroize;
@@ -193,45 +197,86 @@ fn validate_credential(input: &CredentialInput) -> Result<(), String> {
 // --- Impl functions (called by both commands and tests) ---
 
 #[tauri::command]
-fn get_credentials(state: tauri::State<AppState>) -> Result<Vec<Credential>, String> {
-    let _key = require_unlocked(&state)?;
+fn list_credentials(state: tauri::State<AppState>) -> Result<Vec<CredentialSummary>, String> {
+    let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
-
-    let mut stmt = db
-        .prepare("SELECT id, service, username, password_encrypted, url, notes, totp_secret, created_at FROM credentials ORDER BY service")
-        .map_err(|e| e.to_string())?;
-
-    let credentials = stmt.query_map([], |row| {
-        Ok(Credential {
-            id: row.get(0)?, service: row.get(1)?, username: row.get(2)?,
-            password_encrypted: row.get(3)?, url: row.get(4)?, notes: row.get(5)?,
-            totp_secret: row.get(6)?, totp_code: None, created_at: row.get(7)?,
-        })
-    })
-    .map_err(|e| e.to_string())?
-    .collect::<Result<Vec<_>, _>>()
-    .map_err(|e| e.to_string())?;
-
-    let results = credentials.into_iter().map(|mut c| {
-        // Decrypt all encrypted fields
-        c.password_encrypted = vault::decrypt(&_key, &c.password_encrypted).unwrap_or_else(|_| "[decryption failed]".into());
-        c.username = vault::decrypt_opt(&_key, &Some(c.username)).unwrap_or_else(|| "".into());
-        c.url = vault::decrypt_opt(&_key, &Some(c.url)).unwrap_or_else(|| "".into());
-        c.notes = vault::decrypt_opt(&_key, &Some(c.notes)).unwrap_or_else(|| "".into());
-        if let Some(ref secret) = c.totp_secret {
-            c.totp_secret = vault::decrypt_opt(&_key, &Some(secret.clone()));
-            if let Some(ref decrypted_secret) = c.totp_secret {
-                c.totp_code = totp::generate_code(decrypted_secret).ok();
-            }
-        }
-        c
-    }).collect();
-
-    Ok(results)
+    credentials::list_summaries(&db, &key)
 }
 
 #[tauri::command]
-fn add_credential(state: tauri::State<AppState>, input: CredentialInput) -> Result<Credential, String> {
+fn get_credential(state: tauri::State<AppState>, id: String) -> Result<CredentialDetail, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    credentials::detail(&db, &key, &id)
+}
+
+/// The one path that sends a stored password to the webview: an explicit Show.
+#[tauri::command]
+fn reveal_password(state: tauri::State<AppState>, id: String) -> Result<String, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    credentials::reveal_password(&db, &key, &id).map(|password| password.to_string())
+}
+
+#[tauri::command]
+fn describe_password(state: tauri::State<AppState>, id: String) -> Result<PasswordProfile, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    credentials::describe_password(&db, &key, &id)
+}
+
+#[tauri::command]
+fn get_totp(state: tauri::State<AppState>, id: String) -> Result<Option<TotpCode>, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    credentials::totp_code(&db, &key, &id)
+}
+
+/// Copy a login field straight from the database to the clipboard.
+#[tauri::command]
+fn copy_credential_field(
+    state: tauri::State<AppState>,
+    clipboard: tauri::State<Arc<ClipboardGuard>>,
+    id: String,
+    field: CopyField,
+) -> Result<(), String> {
+    let value = {
+        let key = require_unlocked(&state)?;
+        let db = require_db(&state)?;
+        credentials::copy_value(&db, &key, &id, field)?
+    };
+    clipboard.copy(&value)
+}
+
+/// Copy text the webview already holds (a generated password, a command), so
+/// every copy shares the same wipe.
+#[tauri::command]
+fn copy_text(
+    state: tauri::State<AppState>,
+    clipboard: tauri::State<Arc<ClipboardGuard>>,
+    mut text: String,
+) -> Result<(), String> {
+    let _key = require_unlocked(&state)?;
+    let result = clipboard.copy(&text);
+    text.zeroize();
+    result
+}
+
+#[tauri::command]
+async fn check_credential_breach(state: tauri::State<'_, AppState>, id: String) -> Result<u32, String> {
+    let password = {
+        let key = require_unlocked(&state)?;
+        let db = require_db(&state)?;
+        credentials::reveal_password(&db, &key, &id)?
+    };
+    if password.is_empty() {
+        return Err("that login has no password".into());
+    }
+    hibp::check_password(&password).await
+}
+
+#[tauri::command]
+fn add_credential(state: tauri::State<AppState>, input: CredentialInput) -> Result<String, String> {
     let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
     validate_credential(&input)?;
@@ -253,7 +298,8 @@ fn add_credential(state: tauri::State<AppState>, input: CredentialInput) -> Resu
         Ok(())
     })?;
 
-    Ok(Credential { id, service: input.service, username: input.username, password_encrypted: input.password, url: input.url, notes: input.notes, created_at: "just now".into(), totp_secret: None, totp_code: None })
+    // Only the new id goes back; the webview reloads the list for the rest.
+    Ok(id)
 }
 
 #[tauri::command]
@@ -294,90 +340,131 @@ fn delete_credential(state: tauri::State<AppState>, id: String) -> Result<(), St
 
 // ===== Unlock / Lock =====
 
-#[tauri::command]
-fn unlock_vault(state: tauri::State<AppState>, master_password: String) -> Result<bool, String> {
-    let db = require_db(&state)?;
+/// What the vault file holds, read before anything is decrypted.
+#[derive(Debug, PartialEq)]
+enum VaultKind {
+    /// No master password has been set yet.
+    Fresh,
+    /// A pre-DEK vault that migrates on its first unlock.
+    Legacy(String),
+    /// A DEK-model vault.
+    Current { encrypted_dek: String, password_hash: String },
+}
 
-    let encrypted_dek: String = db.query_row("SELECT value FROM vault_config WHERE key = 'encrypted_dek'", [], |row| row.get(0))
-        .map_err(|e| e.to_string())?;
-    let stored_hash: String = db.query_row("SELECT value FROM vault_config WHERE key = 'password_hash'", [], |row| row.get(0))
-        .map_err(|e| e.to_string())?;
+fn vault_kind(db: &Connection) -> Result<VaultKind, String> {
+    let read = |key: &str| -> Result<String, String> {
+        db.query_row("SELECT COALESCE((SELECT value FROM vault_config WHERE key = ?1), '')", [key], |row| row.get(0))
+            .map_err(|e| e.to_string())
+    };
+    let encrypted_dek = read("encrypted_dek")?;
+    let password_hash = read("password_hash")?;
+    let legacy_hash = read("master_hash")?;
+    Ok(match (encrypted_dek.is_empty() && password_hash.is_empty(), legacy_hash.is_empty()) {
+        (true, true) => VaultKind::Fresh,
+        (true, false) => VaultKind::Legacy(legacy_hash),
+        (false, _) => VaultKind::Current { encrypted_dek, password_hash },
+    })
+}
 
-    // Check for legacy vault (pre-DEK model) that needs migration
-    let legacy_hash: String = db.query_row("SELECT COALESCE((SELECT value FROM vault_config WHERE key = 'master_hash'), '')", [], |row| row.get(0))
-        .map_err(|e| e.to_string())?;
-
-    let is_legacy = !legacy_hash.is_empty() && encrypted_dek.is_empty() && stored_hash.is_empty();
-    let is_fresh = encrypted_dek.is_empty() && stored_hash.is_empty() && legacy_hash.is_empty();
-
-    // Legacy migration — must run before any other path
-    if is_legacy {
-        // Pass the already-acquired db guard to avoid deadlock
-        let db_ref = &*db; // deref MutexGuard to get &Connection
-        return migrate_legacy_vault(db_ref, &state, &master_password, &legacy_hash);
+/// Set the master password on a fresh vault and return its new data key.
+///
+/// Refuses if a vault already exists, so creating can never overwrite one.
+/// Everything is written in one transaction: a failure leaves the vault fresh.
+fn create_vault_impl(db: &Connection, master_password: &str) -> Result<[u8; 32], String> {
+    if vault_kind(db)? != VaultKind::Fresh {
+        return Err("a vault already exists".into());
     }
+    // The one path where the password is chosen, so the one place a strength
+    // rule can be enforced without locking anyone out of an older vault.
+    require_min_length(master_password, "Master password", MIN_MASTER_PASSWORD_CHARS)?;
 
-    // load or generate per-vault KDF salt
-    let stored_salt: String = db.query_row("SELECT COALESCE((SELECT value FROM vault_config WHERE key = 'kdf_salt'), '')", [], |row| row.get(0))
-        .map_err(|e| e.to_string())?;
+    let mut kdf_salt = [0u8; 32];
+    fill_random(&mut kdf_salt);
+    let salt_b64 = base64::engine::general_purpose::STANDARD.encode(kdf_salt);
+    let mut wrapping_key = vault::derive_key(master_password, &kdf_salt)?;
+    let dek = vault::generate_dek();
+    let wrapped = vault::wrap_dek(&dek, &wrapping_key);
+    wrapping_key.zeroize();
+    let wrapped = wrapped?;
+    let pass_hash = vault::hash_password(master_password)?;
 
-    let kdf_salt: Vec<u8> = if stored_salt.is_empty() {
-        let mut s = vec![0u8; 32];
-        fill_random(&mut s);
-        let encoded = base64::engine::general_purpose::STANDARD.encode(&s);
-        db.execute("INSERT OR IGNORE INTO vault_config (key, value) VALUES ('kdf_salt', ?1)", rusqlite::params![encoded])
-            .map_err(|e| e.to_string())?;
-        s
-    } else {
-        base64::engine::general_purpose::STANDARD.decode(&stored_salt).map_err(|e| e.to_string())?
+    in_transaction(db, || {
+        for (key, value) in [("encrypted_dek", wrapped.as_str()), ("password_hash", pass_hash.as_str()), ("kdf_salt", salt_b64.as_str()), ("schema_version", "2")] {
+            db.execute("INSERT OR REPLACE INTO vault_config (key, value) VALUES (?1, ?2)", rusqlite::params![key, value])
+                .map_err(|e| e.to_string())?;
+        }
+        activity::log_action(db, "vault_created", "new vault created");
+        Ok(())
+    })?;
+    Ok(dek)
+}
+
+/// Unlock a DEK-model vault. `Ok(None)` means a wrong password, which is
+/// recorded in the activity log.
+fn unlock_current_vault(db: &Connection, master_password: &str) -> Result<Option<[u8; 32]>, String> {
+    let VaultKind::Current { encrypted_dek, password_hash } = vault_kind(db)? else {
+        return Err("no unlockable vault".into());
     };
 
-    // First setup — create new vault
-    if is_fresh {
-        // This is the one path where we choose the password, so it is the one
-        // place a strength rule can be enforced without locking anyone out of a
-        // vault whose password was set before the rule existed.
-        require_min_length(&master_password, "Master password", MIN_MASTER_PASSWORD_CHARS)?;
-
-        let mut wrapping_key = vault::derive_key(&master_password, &kdf_salt)?;
-        let dek = vault::generate_dek();
-        let wrapped = vault::wrap_dek(&dek, &wrapping_key)?;
-        wrapping_key.zeroize();
-        let pass_hash = vault::hash_password(&master_password)?;
-
-        in_transaction(&db, || {
-            db.execute("UPDATE vault_config SET value = ?1 WHERE key = 'encrypted_dek'", rusqlite::params![wrapped]).map_err(|e| e.to_string())?;
-            db.execute("UPDATE vault_config SET value = ?1 WHERE key = 'password_hash'", rusqlite::params![pass_hash]).map_err(|e| e.to_string())?;
-            db.execute("INSERT OR REPLACE INTO vault_config (key, value) VALUES ('schema_version', '2')", []).map_err(|e| e.to_string())?;
-            activity::log_action(&db, "unlock", "new vault created + unlocked");
-            Ok(())
-        })?;
-
-        let mut ek = state.encryption_key.lock().map_err(|e| e.to_string())?;
-        *ek = Some(dek);
-        return Ok(true);
+    if !vault::verify_password(master_password, &password_hash)? {
+        activity::log_action(db, "unlock_failed", "wrong master password");
+        return Ok(None);
     }
 
-    // Verify password hash
-    if !vault::verify_password(&master_password, &stored_hash)? {
-        return Ok(false);
+    let stored_salt: String = db.query_row("SELECT COALESCE((SELECT value FROM vault_config WHERE key = 'kdf_salt'), '')", [], |row| row.get(0))
+        .map_err(|e| e.to_string())?;
+    if stored_salt.is_empty() {
+        return Err("vault has no key-derivation salt".into());
     }
+    let kdf_salt = base64::engine::general_purpose::STANDARD.decode(&stored_salt).map_err(|e| e.to_string())?;
 
-    // Unwrap DEK
-    let mut wrapping_key = vault::derive_key(&master_password, &kdf_salt)?;
-    let dek = vault::unwrap_dek(&encrypted_dek, &wrapping_key)?;
+    let mut wrapping_key = vault::derive_key(master_password, &kdf_salt)?;
+    let dek = vault::unwrap_dek(&encrypted_dek, &wrapping_key);
     wrapping_key.zeroize();
+    let dek = dek?;
 
     // Migrate before publishing the key, so a failed migration leaves the vault
     // locked rather than unlocked in a half-migrated state.
-    migrate_plaintext_fields(&db, &dek)?;
+    migrate_plaintext_fields(db, &dek)?;
+    activity::log_action(db, "unlock", "vault unlocked");
+    Ok(Some(dek))
+}
 
-    {
-        let mut ek = state.encryption_key.lock().map_err(|e| e.to_string())?;
-        *ek = Some(dek);
+/// Whether a master password exists yet, so the first launch shows setup
+/// instead of an unlock form. It says nothing the database file's own
+/// presence doesn't, and it decrypts nothing.
+#[tauri::command]
+fn vault_status(state: tauri::State<AppState>) -> Result<&'static str, String> {
+    let db = require_db(&state)?;
+    Ok(if vault_kind(&db)? == VaultKind::Fresh { "new" } else { "sealed" })
+}
+
+#[tauri::command]
+fn create_vault(state: tauri::State<AppState>, master_password: String) -> Result<(), String> {
+    let db = require_db(&state)?;
+    let dek = create_vault_impl(&db, &master_password)?;
+    let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
+    *key = Some(dek);
+    Ok(())
+}
+
+#[tauri::command]
+fn unlock_vault(state: tauri::State<AppState>, master_password: String) -> Result<bool, String> {
+    let db = require_db(&state)?;
+    match vault_kind(&db)? {
+        // Unlocking no longer creates a vault; that is create_vault's job, behind
+        // a confirmed password on the setup screen.
+        VaultKind::Fresh => Err("no vault has been created yet".into()),
+        VaultKind::Legacy(legacy_hash) => migrate_legacy_vault(&db, &state, &master_password, &legacy_hash),
+        VaultKind::Current { .. } => match unlock_current_vault(&db, &master_password)? {
+            Some(dek) => {
+                let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
+                *key = Some(dek);
+                Ok(true)
+            }
+            None => Ok(false),
+        },
     }
-    activity::log_action(&db, "unlock", "vault unlocked");
-    Ok(true)
 }
 
 /// Migrate a legacy vault (pre-DEK model) to the new DEK model.
@@ -400,7 +487,8 @@ fn migrate_legacy_vault(
     // master password, so it must not leak how many leading bytes matched.
     if !constant_time_eq(check_hash.as_bytes(), legacy_hash.as_bytes()) {
         legacy_key.zeroize();
-        return Ok(false); // wrong password
+        activity::log_action(db, "unlock_failed", "wrong master password");
+        return Ok(false);
     }
 
     // Read all existing credentials (encrypted with legacy key)
@@ -552,7 +640,10 @@ fn migrate_plaintext_fields_inner(db: &Connection, dek: &[u8; 32]) -> Result<(),
 }
 
 #[tauri::command]
-fn lock_vault(state: tauri::State<AppState>) -> Result<(), String> {
+fn lock_vault(state: tauri::State<AppState>, clipboard: tauri::State<Arc<ClipboardGuard>>) -> Result<(), String> {
+    // Every lock path (button, shortcut, idle timer, blur) ends here, so this
+    // is the one place a still-pending copied secret gets wiped.
+    clipboard.wipe_now();
     let db = require_db(&state)?;
     activity::log_action(&db, "lock", "vault locked");
     let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
@@ -983,11 +1074,14 @@ fn main() {
                 db: Mutex::new(conn),
                 encryption_key: Mutex::new(None),
             });
+            app.manage(ClipboardGuard::system());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            get_credentials, add_credential, update_credential, delete_credential,
-            unlock_vault, lock_vault,
+            list_credentials, get_credential, reveal_password, describe_password, get_totp,
+            copy_credential_field, copy_text, check_credential_breach,
+            add_credential, update_credential, delete_credential,
+            vault_status, create_vault, unlock_vault, lock_vault,
             setup_totp, get_totp_remaining, remove_totp,
             check_hibp,
             create_project, get_projects, delete_project,
@@ -1169,6 +1263,217 @@ mod tests {
         assert_eq!(vault::decrypt(&unwrapped, &stored_pw).unwrap(), "gh_p@$$w0rd");
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    // ===== Credential reads that keep secrets in Rust =====
+
+    /// A seeded, file-backed vault, reopened through a fresh connection so
+    /// every read below goes through what is actually on disk.
+    fn reopened_seeded_vault(label: &str) -> (PathBuf, Connection, [u8; 32]) {
+        let dir = migration_test_dir(label);
+        let path = dir.join(CURRENT_DATABASE_NAME);
+        let dek = create_test_vault(&path, "credential-read-password");
+        {
+            let conn = Connection::open(&path).unwrap();
+            seed_vault(&conn, &dek);
+        }
+        let conn = vault::init_db(&path).unwrap();
+        (dir, conn, dek)
+    }
+
+    #[test]
+    fn test_credential_list_carries_no_secrets() {
+        let (dir, conn, dek) = reopened_seeded_vault("cred-list");
+
+        let list = credentials::list_summaries(&conn, &dek).unwrap();
+        let json = serde_json::to_string(&list).unwrap();
+
+        assert_eq!(list.len(), 2);
+        for secret in ["gh_p@$$w0rd", "short12chars", "personal account", "JBSWY3DPEHPK3PXP", "https://github.com", "prod"] {
+            assert!(!json.contains(secret), "list must not carry {secret:?}: {json}");
+        }
+        let github = list.iter().find(|c| c.id == "c1").unwrap();
+        assert_eq!(github.username, "dev@example.com");
+        assert!(github.has_totp);
+        assert!(!list.iter().find(|c| c.id == "c2").unwrap().has_totp);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_credential_detail_reveal_and_copy_values() {
+        let (dir, conn, dek) = reopened_seeded_vault("cred-fields");
+
+        let detail = credentials::detail(&conn, &dek, "c1").unwrap();
+        assert_eq!(detail.url, "https://github.com");
+        assert_eq!(detail.notes, "personal account");
+        assert_eq!(credentials::reveal_password(&conn, &dek, "c1").unwrap().as_str(), "gh_p@$$w0rd");
+
+        let copy = |field| credentials::copy_value(&conn, &dek, "c1", field).unwrap().to_string();
+        assert_eq!(copy(CopyField::Username), "dev@example.com");
+        assert_eq!(copy(CopyField::Password), "gh_p@$$w0rd");
+        assert_eq!(copy(CopyField::Url), "https://github.com");
+        let code = credentials::totp_code(&conn, &dek, "c1").unwrap().unwrap();
+        assert_eq!(code.code.len(), 6);
+        assert!(code.code.chars().all(|c| c.is_ascii_digit()));
+        assert!((1..=30).contains(&code.remaining));
+
+        assert_eq!(credentials::totp_code(&conn, &dek, "c2").unwrap(), None);
+        assert!(credentials::copy_value(&conn, &dek, "c2", CopyField::Totp).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_credential_reads_fail_cleanly_on_bad_input() {
+        let (dir, conn, dek) = reopened_seeded_vault("cred-bad-input");
+
+        // Unknown id: an error, not an empty value.
+        assert!(credentials::detail(&conn, &dek, "missing").is_err());
+        assert!(credentials::reveal_password(&conn, &dek, "missing").is_err());
+        assert!(credentials::copy_value(&conn, &dek, "missing", CopyField::Password).is_err());
+
+        // Wrong key: the password is an error, never placeholder text that could
+        // be copied as if it were real; the list still loads with blank usernames.
+        let wrong = [7u8; 32];
+        let err = credentials::reveal_password(&conn, &wrong, "c1").unwrap_err();
+        assert!(!err.contains("[decryption failed]"));
+        let list = credentials::list_summaries(&conn, &wrong).unwrap();
+        assert!(list.iter().all(|c| c.username.is_empty()));
+
+        // Corrupted ciphertext on disk: errors, no panic.
+        conn.execute("UPDATE credentials SET password_encrypted = 'not base64 at all!', totp_secret = 'AAAA' WHERE id = 'c1'", []).unwrap();
+        assert!(credentials::reveal_password(&conn, &dek, "c1").is_err());
+        assert!(credentials::totp_code(&conn, &dek, "c1").is_err());
+        assert!(credentials::copy_value(&conn, &dek, "c1", CopyField::Password).is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_copy_credential_field_reaches_the_clipboard_and_lock_wipes_it() {
+        use clipboard::tests::FakeClipboard;
+        let (dir, conn, dek) = reopened_seeded_vault("cred-copy");
+        let fake = Arc::new(FakeClipboard::default());
+        let guard = ClipboardGuard::new(Box::new(Arc::clone(&fake)), std::time::Duration::from_secs(60));
+
+        let value = credentials::copy_value(&conn, &dek, "c1", CopyField::Password).unwrap();
+        guard.copy(&value).unwrap();
+        assert_eq!(fake.0.lock().unwrap().as_deref(), Some("gh_p@$$w0rd"));
+
+        assert!(guard.wipe_now(), "locking must wipe a pending copy");
+        assert_eq!(*fake.0.lock().unwrap(), None);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    // ===== Create, unlock and status =====
+
+    /// A file-backed database with the tables but no master password yet.
+    fn fresh_vault_file(label: &str) -> (PathBuf, PathBuf) {
+        let dir = migration_test_dir(label);
+        let path = dir.join(CURRENT_DATABASE_NAME);
+        let conn = vault::init_db(&path).unwrap();
+        activity::init_activity_table(&conn).unwrap();
+        (dir, path)
+    }
+
+    fn activity_actions(conn: &Connection) -> Vec<String> {
+        let mut stmt = conn.prepare("SELECT action FROM activity_log").unwrap();
+        stmt.query_map([], |row| row.get(0)).unwrap().collect::<Result<_, _>>().unwrap()
+    }
+
+    #[test]
+    fn test_create_vault_then_unlock_after_reopen() {
+        let (dir, path) = fresh_vault_file("create-unlock");
+        let password = "a-long-master-password";
+        let dek = {
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(vault_kind(&conn).unwrap(), VaultKind::Fresh);
+            create_vault_impl(&conn, password).unwrap()
+        };
+
+        let conn = vault::init_db(&path).unwrap();
+        assert!(matches!(vault_kind(&conn).unwrap(), VaultKind::Current { .. }));
+        assert_eq!(unlock_current_vault(&conn, password).unwrap(), Some(dek));
+        assert_eq!(unlock_current_vault(&conn, "not-the-password").unwrap(), None);
+
+        let actions = activity_actions(&conn);
+        assert!(actions.contains(&"vault_created".to_string()));
+        assert!(actions.contains(&"unlock".to_string()));
+        assert!(actions.contains(&"unlock_failed".to_string()), "a wrong password must be logged");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_create_vault_refuses_to_replace_an_existing_vault() {
+        let (dir, path) = fresh_vault_file("create-twice");
+        let conn = Connection::open(&path).unwrap();
+        let dek = create_vault_impl(&conn, "the-original-password").unwrap();
+
+        assert!(create_vault_impl(&conn, "a-replacement-password").is_err());
+        drop(conn);
+
+        let conn = vault::init_db(&path).unwrap();
+        assert_eq!(unlock_current_vault(&conn, "the-original-password").unwrap(), Some(dek));
+        assert_eq!(unlock_current_vault(&conn, "a-replacement-password").unwrap(), None);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_create_vault_rejects_short_password_and_stays_fresh() {
+        let (dir, path) = fresh_vault_file("create-short");
+        let conn = Connection::open(&path).unwrap();
+        assert!(create_vault_impl(&conn, "short").is_err());
+        assert_eq!(vault_kind(&conn).unwrap(), VaultKind::Fresh);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_create_vault_rolls_back_when_a_write_fails() {
+        let (dir, path) = fresh_vault_file("create-rollback");
+        let conn = Connection::open(&path).unwrap();
+        // Fail the second of the four config writes, after encrypted_dek landed.
+        conn.execute_batch(
+            "CREATE TRIGGER fail_hash BEFORE INSERT ON vault_config WHEN NEW.key = 'password_hash'
+             BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+        ).unwrap();
+
+        assert!(create_vault_impl(&conn, "a-long-master-password").is_err());
+        // The trigger would also fire on init_db's own setup inserts.
+        conn.execute_batch("DROP TRIGGER fail_hash").unwrap();
+        drop(conn);
+
+        let conn = vault::init_db(&path).unwrap();
+        assert_eq!(vault_kind(&conn).unwrap(), VaultKind::Fresh, "a failed create must leave no half-made vault");
+        let dek_value: String = conn.query_row("SELECT value FROM vault_config WHERE key = 'encrypted_dek'", [], |r| r.get(0)).unwrap();
+        assert!(dek_value.is_empty());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_unlock_refuses_a_fresh_vault() {
+        let (dir, path) = fresh_vault_file("unlock-fresh");
+        let conn = Connection::open(&path).unwrap();
+        assert!(unlock_current_vault(&conn, "anything-at-all-here").is_err());
+        assert_eq!(vault_kind(&conn).unwrap(), VaultKind::Fresh, "unlock must never create a vault");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_describe_password_reports_shape_only() {
+        let (dir, conn, dek) = reopened_seeded_vault("cred-describe");
+        let profile = credentials::describe_password(&conn, &dek, "c1").unwrap();
+        // "gh_p@$$w0rd"
+        assert_eq!(profile, PasswordProfile { length: 11, lowercase: true, uppercase: false, digits: true, symbols: true });
+        assert!(credentials::describe_password(&conn, &dek, "missing").is_err());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

@@ -3,16 +3,33 @@
  * backend struct surfaces as a compile error here rather than at runtime.
  */
 
-export interface Credential {
+/** A row in the vault list. Carries no password, notes or 2FA secret. */
+export interface CredentialSummary {
   id: string;
   service: string;
   username: string;
-  password_encrypted: string;
+  has_totp: boolean;
+  created_at: string;
+}
+
+/** The open record, still without the password or 2FA secret. */
+export interface CredentialDetail extends CredentialSummary {
   url: string;
   notes: string;
-  created_at: string;
-  totp_secret: string | null;
-  totp_code: string | null;
+}
+
+export interface TotpCode {
+  code: string;
+  remaining: number;
+}
+
+/** Shape of a stored password, for the record summary. Not the password. */
+export interface PasswordProfile {
+  length: number;
+  lowercase: boolean;
+  uppercase: boolean;
+  digits: boolean;
+  symbols: boolean;
 }
 
 export interface CredentialInput {

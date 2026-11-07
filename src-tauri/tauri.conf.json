@@ -13,10 +13,12 @@
     "windows": [
       {
         "title": "Encra",
-        "width": 700,
-        "height": 720,
+        "width": 1180,
+        "height": 760,
+        "minWidth": 760,
+        "minHeight": 600,
         "center": true,
-        "resizable": false,
+        "resizable": true,
         "fullscreen": false
       }
     ],

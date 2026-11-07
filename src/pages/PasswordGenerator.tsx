@@ -1,5 +1,5 @@
 import { useCallback, useState } from "react";
-import { Icon } from "../components/Icon";
+import { describeError } from "../lib/errors";
 import { useClipboard } from "../lib/useClipboard";
 
 const LOWERCASE = "abcdefghijklmnopqrstuvwxyz";
@@ -52,7 +52,7 @@ function generatePassword(length: number, charset: string): string {
 }
 
 interface PasswordGeneratorProps {
-  onClose?: () => void;
+  onClose: () => void;
 }
 
 function PasswordGenerator({ onClose }: PasswordGeneratorProps) {
@@ -62,8 +62,9 @@ function PasswordGenerator({ onClose }: PasswordGeneratorProps) {
   const [useDigits, setUseDigits] = useState(true);
   const [useSymbols, setUseSymbols] = useState(true);
   const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
 
-  const { copy, copiedId } = useClipboard({ feedbackMs: 2000 });
+  const { copyText, copiedId } = useClipboard(2000);
 
   const charset = [
     useLower ? LOWERCASE : "",
@@ -72,8 +73,7 @@ function PasswordGenerator({ onClose }: PasswordGeneratorProps) {
     useSymbols ? SYMBOLS : "",
   ].join("");
 
-  // Previously an empty selection silently fell back to the full character set,
-  // ignoring what the user asked for.
+  // An empty selection used to fall back silently to every character set.
   const noCharset = charset.length === 0;
 
   const generate = useCallback(() => {
@@ -81,121 +81,54 @@ function PasswordGenerator({ onClose }: PasswordGeneratorProps) {
     setPassword(generatePassword(length, charset));
   }, [length, charset, noCharset]);
 
+  const copy = async () => {
+    try {
+      await copyText(password, "generated");
+    } catch (err) {
+      setError(describeError(err, "Could not copy the password."));
+    }
+  };
+
   const strength = getStrength(password);
 
   return (
-    <div className="pwgen-page">
-      <div className="page-header">
-        <div className="page-heading-with-back">
-          {onClose && (
-            <button className="btn-icon" onClick={onClose} aria-label="Back to toolbox">
-              <Icon name="arrow-left" size={18} />
-            </button>
-          )}
-          <div className="page-heading">
-            <span className="eyebrow">Cryptographic utility</span>
-            <h1>Password generator</h1>
-            <p>Create strong, unbiased passwords entirely on this device.</p>
-          </div>
+    <div className="page">
+      <button className="btn-text back" onClick={onClose}>← Toolbox</button>
+      <header className="page-head">
+        <div>
+          <h1 className="title-l">Password generator</h1>
+          <p className="lead">Made on this machine from its secure random source. Nothing is stored until you save it to a login.</p>
         </div>
+      </header>
+
+      <section className="field" aria-live="polite">
+        <span className="label">Generated</span>
+        <p className="generated">{password || <span className="meta">Nothing generated yet.</span>}</p>
+        {password && <p className="meta">{strength.label}. {password.length} characters.</p>}
+      </section>
+
+      <div className="actions">
+        <button className="btn" onClick={generate} disabled={noCharset}>{password ? "Generate another" : "Generate"}</button>
+        <button className="btn-text" onClick={() => void copy()} disabled={!password}>
+          {copiedId === "generated" ? "Copied" : "Copy"}
+        </button>
       </div>
+      {error && <p className="error" role="alert">{error}</p>}
 
-      <div className="pwgen-content">
-        <section className="pwgen-output-card">
-          <div className="pwgen-card-label"><Icon name="key" size={15} />Generated password</div>
-          <div className="pwgen-output">
-            <label className="sr-only" htmlFor="generated-password">Generated password</label>
-            <input
-              id="generated-password"
-              type="text"
-              className="pwgen-field"
-              value={password}
-              readOnly
-              placeholder="Your secure password will appear here"
-            />
-            <button
-              className="btn-icon pwgen-copy"
-              onClick={() => void copy(password, "generated")}
-              disabled={!password}
-              aria-label="Copy generated password"
-            >
-              <Icon name={copiedId === "generated" ? "check" : "copy"} size={18} />
-            </button>
-          </div>
+      <section className="field">
+        <label className="label" htmlFor="pw-length">Length: {length}</label>
+        <input id="pw-length" className="range" type="range" min={8} max={64} value={length}
+          onChange={(event) => setLength(Number(event.target.value))} />
+      </section>
 
-          {password ? (
-            <div className="pwgen-strength">
-              <div className="strength-meta">
-                <span className={`strength-${strength.tier}`}>{strength.label}</span>
-                <span>{password.length} characters</span>
-              </div>
-              <div className="strength-bar-bg">
-                {/* Width and colour come from data attributes and classes, so no
-                    inline style is needed under the strict CSP. */}
-                <div
-                  className={`strength-bar-fill is-${strength.tier}`}
-                  data-score={strength.score}
-                />
-              </div>
-            </div>
-          ) : (
-            <div className="pwgen-strength-placeholder">
-              <Icon name="shield" size={14} />Generated locally using cryptographic randomness
-            </div>
-          )}
-        </section>
-
-        <section className="pwgen-options">
-          <div className="option-heading">
-            <div><h3>Customize</h3><p>Choose length and character composition.</p></div>
-            <strong>{length}</strong>
-          </div>
-          <div className="option-row option-length">
-            <input
-              type="range"
-              min={8}
-              max={64}
-              value={length}
-              onChange={(event) => setLength(Number(event.target.value))}
-              aria-label="Password length"
-            />
-            <div className="range-labels"><span>8</span><span>64</span></div>
-          </div>
-
-          <div className="option-grid">
-            <label className="option-check">
-              <input type="checkbox" checked={useLower} onChange={(event) => setUseLower(event.target.checked)} />
-              <span className="custom-check"><Icon name="check" size={13} /></span>
-              <span><strong>Lowercase</strong><small>a–z</small></span>
-            </label>
-            <label className="option-check">
-              <input type="checkbox" checked={useUpper} onChange={(event) => setUseUpper(event.target.checked)} />
-              <span className="custom-check"><Icon name="check" size={13} /></span>
-              <span><strong>Uppercase</strong><small>A–Z</small></span>
-            </label>
-            <label className="option-check">
-              <input type="checkbox" checked={useDigits} onChange={(event) => setUseDigits(event.target.checked)} />
-              <span className="custom-check"><Icon name="check" size={13} /></span>
-              <span><strong>Numbers</strong><small>0–9</small></span>
-            </label>
-            <label className="option-check">
-              <input type="checkbox" checked={useSymbols} onChange={(event) => setUseSymbols(event.target.checked)} />
-              <span className="custom-check"><Icon name="check" size={13} /></span>
-              <span><strong>Symbols</strong><small>!@#$</small></span>
-            </label>
-          </div>
-
-          {noCharset && (
-            <p className="lock-error" role="alert">
-              <Icon name="x" size={13} />Select at least one character set.
-            </p>
-          )}
-
-          <button className="btn-primary btn-generate" onClick={generate} disabled={noCharset}>
-            <Icon name="sparkles" size={17} />Generate password
-          </button>
-        </section>
-      </div>
+      <fieldset className="options">
+        <legend className="label">Characters</legend>
+        <label className="checkbox"><input type="checkbox" checked={useLower} onChange={(e) => setUseLower(e.target.checked)} />Lowercase a–z</label>
+        <label className="checkbox"><input type="checkbox" checked={useUpper} onChange={(e) => setUseUpper(e.target.checked)} />Uppercase A–Z</label>
+        <label className="checkbox"><input type="checkbox" checked={useDigits} onChange={(e) => setUseDigits(e.target.checked)} />Numbers 0–9</label>
+        <label className="checkbox"><input type="checkbox" checked={useSymbols} onChange={(e) => setUseSymbols(e.target.checked)} />Symbols !@#$</label>
+      </fieldset>
+      {noCharset && <p className="error" role="alert">Pick at least one set of characters.</p>}
     </div>
   );
 }
