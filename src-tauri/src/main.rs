@@ -736,13 +736,30 @@ fn migrate_plaintext_fields_inner(db: &Connection, dek: &[u8; 32]) -> Result<(),
     Ok(())
 }
 
+/// How the vault was sealed, for the log. The webview sends one of a fixed set
+/// of codes and the wording comes from here, so it can't write free text into
+/// the log.
+fn seal_detail(reason: Option<&str>) -> &'static str {
+    match reason {
+        Some("button") => "sealed with the Seal button",
+        Some("shortcut") => "sealed with the keyboard shortcut",
+        Some("idle") => "sealed after 5 idle minutes",
+        Some("app_switch") => "sealed when Encra lost focus",
+        _ => "vault locked",
+    }
+}
+
 #[tauri::command]
-fn lock_vault(state: tauri::State<AppState>, clipboard: tauri::State<Arc<ClipboardGuard>>) -> Result<(), String> {
+fn lock_vault(
+    state: tauri::State<AppState>,
+    clipboard: tauri::State<Arc<ClipboardGuard>>,
+    reason: Option<String>,
+) -> Result<(), String> {
     // Every lock path (button, shortcut, idle timer, blur) ends here, so this
     // is the one place a still-pending copied secret gets wiped.
     clipboard.wipe_now();
     let db = require_db(&state)?;
-    activity::log_action(&db, "lock", "vault locked");
+    activity::log_action(&db, "lock", seal_detail(reason.as_deref()));
     let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
     if let Some(dek) = key.as_ref() {
         seal_log(&db, dek);
@@ -1887,6 +1904,17 @@ mod tests {
         let hostile = sealed.replacen("m=262144", "m=99999999", 1);
         assert!(open_backup(&hostile, "backup-pass").unwrap_err().contains("out of range"));
         assert!(open_backup("encra-backup:2:m=262144,t=3,p=1", "backup-pass").is_err());
+    }
+
+    #[test]
+    fn test_seal_detail_only_uses_known_wording() {
+        assert_eq!(seal_detail(Some("button")), "sealed with the Seal button");
+        assert_eq!(seal_detail(Some("shortcut")), "sealed with the keyboard shortcut");
+        assert_eq!(seal_detail(Some("idle")), "sealed after 5 idle minutes");
+        assert_eq!(seal_detail(Some("app_switch")), "sealed when Encra lost focus");
+        // Anything else, including text meant to forge a log line, is ignored.
+        assert_eq!(seal_detail(Some("vault unlocked\nunlock")), "vault locked");
+        assert_eq!(seal_detail(None), "vault locked");
     }
 
     #[test]

@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { EmptyState } from "../components/EmptyState";
 import { describeError } from "../lib/errors";
-import { dayLabel, formatTime, parseStored } from "../lib/format";
+import { dayLabel, formatTimeExact, parseStored } from "../lib/format";
 import type { ActivityEntry, ActivityLog, ChainStatus } from "../lib/types";
 
 const ACTION_LABELS: Record<string, string> = {
@@ -30,7 +30,7 @@ function groupByDay(entries: ActivityEntry[]): Day[] {
   for (const entry of entries) {
     const when = parseStored(entry.timestamp);
     const label = when ? dayLabel(when) : "Unknown date";
-    const time = when ? formatTime(when) : entry.timestamp;
+    const time = when ? formatTimeExact(when) : entry.timestamp;
     const last = days[days.length - 1];
     if (last && last.label === label) last.rows.push({ entry, time });
     else days.push({ label, rows: [{ entry, time }] });

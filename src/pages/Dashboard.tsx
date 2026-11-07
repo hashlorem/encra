@@ -15,6 +15,8 @@ import {
 } from "../lib/preferences";
 
 type Module = "vault" | "journal" | "tools" | "activity" | "settings";
+/** Why the vault was sealed; Rust turns this into the log wording. */
+type SealReason = "button" | "shortcut" | "idle" | "app_switch";
 
 const AUTO_LOCK_MINUTES = 5;
 const DEFAULT_LOCK_BINDING = "meta+l";
@@ -69,22 +71,22 @@ function Dashboard({ onLock }: DashboardProps) {
   }, []);
 
   /** Clear the key in Rust (which also wipes a pending clipboard copy). */
-  const sealBackend = useCallback(async () => {
+  const sealBackend = useCallback(async (reason: SealReason) => {
     try {
-      await invoke("lock_vault");
+      await invoke("lock_vault", { reason });
     } catch (error) {
       // Lock the UI anyway: failing open would be worse than a noisy log.
       console.error("Unable to clear the vault key while locking", error);
     }
   }, []);
 
-  const handleLock = useCallback(async () => {
+  const handleLock = useCallback(async (reason: SealReason) => {
     if (lockingRef.current) return;
     lockingRef.current = true;
     if (readBooleanPreference(PREFERENCE_KEYS.sound, true)) playLockChime();
     setSealing(true);
     if (!prefersReducedMotion()) await new Promise((resolve) => setTimeout(resolve, SEAL_MS));
-    await sealBackend();
+    await sealBackend(reason);
     onLock();
   }, [onLock, sealBackend]);
 
@@ -94,7 +96,7 @@ function Dashboard({ onLock }: DashboardProps) {
     // Background webviews throttle timers, so hide the workspace synchronously
     // and skip the fade.
     document.documentElement.classList.add("vault-seal-guard");
-    void sealBackend();
+    void sealBackend("app_switch");
     onLock();
   }, [onLock, sealBackend]);
 
@@ -103,7 +105,7 @@ function Dashboard({ onLock }: DashboardProps) {
     if (now - lastActivityRef.current < ACTIVITY_THROTTLE_MS) return;
     lastActivityRef.current = now;
     if (timerRef.current) clearTimeout(timerRef.current);
-    timerRef.current = setTimeout(() => void handleLock(), AUTO_LOCK_MINUTES * 60 * 1000);
+    timerRef.current = setTimeout(() => void handleLock("idle"), AUTO_LOCK_MINUTES * 60 * 1000);
   }, [handleLock]);
 
   useEffect(() => {
@@ -145,7 +147,7 @@ function Dashboard({ onLock }: DashboardProps) {
         key.length === 1 ? event.code === `Key${key.toUpperCase()}` : event.key.toLowerCase() === key;
       if (keyMatches && modifierMatches && event.shiftKey === wantsShift) {
         event.preventDefault();
-        void handleLock();
+        void handleLock("shortcut");
       }
     };
     window.addEventListener("keydown", handler);
@@ -191,7 +193,7 @@ function Dashboard({ onLock }: DashboardProps) {
             </button>
           ))}
         </nav>
-        <button className="seal" onClick={() => void handleLock()} disabled={sealing}>
+        <button className="seal" onClick={() => void handleLock("button")} disabled={sealing}>
           <Print kind="loop" />
           <span className="seal-copy">
             <span>
