@@ -4,6 +4,7 @@ import { Print } from "../components/Print";
 import { Wordmark } from "../components/Wordmark";
 import { describeError } from "../lib/errors";
 import { useClipboard } from "../lib/useClipboard";
+import { groupCode } from "../lib/format";
 
 const MIN_CHARS = 12;
 
@@ -127,7 +128,7 @@ function Setup({ onDone }: SetupProps) {
           {codes ? (
             <ol className="codes stagger">
               {codes.map((code) => (
-                <li key={code}>{code}</li>
+                <li key={code}>{groupCode(code)}</li>
               ))}
             </ol>
           ) : (
@@ -140,7 +141,7 @@ function Setup({ onDone }: SetupProps) {
             {codes ? (
               <>
                 <button className="btn" onClick={onDone}>Done</button>
-                <button className="btn-text" onClick={() => void copyText(codes.join("\n"), "codes")}>
+                <button className="btn-text" onClick={() => void copyText(codes.map(groupCode).join("\n"), "codes")}>
                   {copiedId === "codes" ? "Copied" : "Copy"}
                 </button>
               </>

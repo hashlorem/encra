@@ -1549,6 +1549,50 @@ mod tests {
     }
 
     #[test]
+    fn test_recovery_code_accepts_how_people_write_it_down() {
+        let dir = migration_test_dir("recovery-written");
+        let path = dir.join(CURRENT_DATABASE_NAME);
+        let dek = create_test_vault(&path, "original-password-123");
+        let conn = vault::init_db(&path).unwrap();
+        activity::init_activity_table(&conn).unwrap();
+        let codes = activity::generate_recovery_codes(&conn, &dek).unwrap();
+
+        // Every generated code is already in normal form.
+        for code in &codes {
+            assert_eq!(&activity::normalize_recovery_code(code), code);
+        }
+
+        // Grouped in fours, lowercase, with a stray dash and trailing newline.
+        let code = &codes[0];
+        let written: String = code
+            .to_lowercase()
+            .chars()
+            .collect::<Vec<_>>()
+            .chunks(4)
+            .map(|group| group.iter().collect::<String>())
+            .collect::<Vec<_>>()
+            .join(" ")
+            .replacen(' ', "-", 1)
+            + "\n";
+        let recovered = activity::recover_and_reset(&conn, &written, "a-brand-new-password").unwrap();
+        assert_eq!(recovered, Some(dek));
+        drop(conn);
+
+        // After reopening: the new password works, and the code is spent.
+        let conn = vault::init_db(&path).unwrap();
+        assert_eq!(unlock_current_vault(&conn, "a-brand-new-password").unwrap(), Some(dek));
+        assert!(activity::recover_dek(&conn, code).unwrap().is_none(), "the code must be consumed");
+        // A near miss still fails: one character changed.
+        let mut near = codes[1].clone();
+        let last = if near.ends_with('A') { 'B' } else { 'A' };
+        near.pop();
+        near.push(last);
+        assert!(activity::recover_dek(&conn, &near).unwrap().is_none());
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
     fn test_recovery_code_wrong_code_fails() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         activity::init_activity_table(&conn).unwrap();
@@ -1747,7 +1791,8 @@ mod tests {
 
         // Create a deliberately malformed wrapped DEK: valid AES-GCM of a 1-byte payload
         // (not a valid 32-byte DEK), stored with a known recovery code
-        let code = "TEST-CODE-26-CHARS-LONG!!"; // exactly 26 chars
+        // A code in the real alphabet and normal form, as generate_recovery_codes makes them.
+        let code = "ABCDEFGHJKLMNPQRSTUVWXYZ23";
         let hash = sha256_hash(code);
 
         use aes_gcm::aead::{Aead, KeyInit, OsRng};

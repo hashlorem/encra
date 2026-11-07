@@ -13,6 +13,7 @@ import {
   writePreference,
 } from "../lib/preferences";
 import { describeError } from "../lib/errors";
+import { groupCode } from "../lib/format";
 import { useClipboard } from "../lib/useClipboard";
 import { APP_NAME, APP_VERSION } from "../lib/appInfo";
 
@@ -186,7 +187,7 @@ function Settings() {
 
   const copyAllCodes = () => {
     if (!recoveryCodes) return;
-    copyText(recoveryCodes.join("\n"), "recovery-codes").catch((error) =>
+    copyText(recoveryCodes.map(groupCode).join("\n"), "recovery-codes").catch((error) =>
       setReauthError(describeError(error, "Could not copy the codes.")),
     );
   };
@@ -225,7 +226,7 @@ function Settings() {
               <>
                 <p className="lead">This is the only time these are shown. Write them down or print them now.</p>
                 <ol className="codes stagger">
-                  {recoveryCodes.map((code) => <li key={code}>{code}</li>)}
+                  {recoveryCodes.map((code) => <li key={code}>{groupCode(code)}</li>)}
                 </ol>
                 <div className="actions">
                   <button className="btn" onClick={dismissRecoveryCodes}>I’ve saved them</button>

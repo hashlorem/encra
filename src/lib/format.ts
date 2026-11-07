@@ -52,6 +52,14 @@ export function countWord(n: number): string {
   return String(n);
 }
 
+/**
+ * A recovery code in groups of four, for reading and writing down. The backend
+ * ignores the spaces, so a code typed this way still works.
+ */
+export function groupCode(code: string): string {
+  return code.match(/.{1,4}/g)?.join(" ") ?? code;
+}
+
 /** "letters, numbers and symbols" from a list of parts. */
 export function joinWords(parts: string[]): string {
   if (parts.length <= 1) return parts.join("");

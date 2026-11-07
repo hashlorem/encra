@@ -769,10 +769,12 @@ kbd,
 .strength-bar[data-level="4"] span { width: 100%; }
 
 .codes {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 8px 32px;
-  font: 400 16px/1.6 var(--mono);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font: 400 15px/1.5 var(--mono);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
 }
 
 /* ---------- Case notes ---------- */

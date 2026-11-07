@@ -132,11 +132,26 @@ pub fn generate_recovery_codes(conn: &Connection, dek: &[u8; 32]) -> Result<Vec<
 /// Does NOT consume the code and does not open a transaction, so it can be called
 /// inside a caller-managed transaction. Prefer `recover_and_reset`, which does
 /// the lookup, the password change, and the consumption in one atomic step.
+/// Undo the ways a person writes a code down: spaces or dashes between
+/// groups, lowercase. Codes only contain uppercase letters and digits, so this
+/// can never turn one valid code into another.
+pub fn normalize_recovery_code(input: &str) -> String {
+    input
+        .chars()
+        .filter(|c| !c.is_whitespace() && *c != '-')
+        .flat_map(char::to_uppercase)
+        .collect()
+}
+
 pub fn recover_dek(conn: &Connection, code: &str) -> Result<Option<([u8; 32], i64)>, String> {
     use aes_gcm::aead::{Aead, KeyInit};
     use aes_gcm::{Aes256Gcm, Nonce};
     use argon2::Argon2;
 
+    // Normalise once, so the hash lookup and the key derivation see the same
+    // code.
+    let code = zeroize::Zeroizing::new(normalize_recovery_code(code));
+    let code = code.as_str();
     let hash = sha256_hash(code);
 
     let result = conn.query_row(
