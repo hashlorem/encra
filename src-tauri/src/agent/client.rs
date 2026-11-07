@@ -20,8 +20,9 @@ use super::{refs, sock};
 
 const USAGE: &str = "usage: encra run [--name AGENT] [--env-file FILE]... [--env KEY=VALUE]... -- COMMAND [ARGS]...
 
-Values written as encra://Login#field (password, username or url) are filled
-in after you approve the request in Encra.";
+Values written as encra://Login#field (password, username, url or totp) are
+filled in after you approve the request in Encra. A totp code is made at that
+moment and lasts until its 30-second window ends.";
 
 /// Exit code when the request is denied, distinct from other failures.
 const DENIED: i32 = 77;

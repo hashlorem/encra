@@ -2,6 +2,7 @@
 //!
 //!   encra://GitHub              the password of the login named "GitHub"
 //!   encra://GitHub#username     another field of it
+//!   encra://GitHub#totp         its current 2FA code, made when you approve
 //!   encra://id/<uuid>#password  by id, for names that are not unique
 //!
 //! Names match exactly. A missing or ambiguous name is refused, never guessed.
@@ -48,7 +49,8 @@ pub fn parse(text: &str) -> Result<Reference, String> {
                 "password" => CopyField::Password,
                 "username" => CopyField::Username,
                 "url" => CopyField::Url,
-                other => return Err(format!("unknown field \"{other}\" (use password, username or url)")),
+                "totp" => CopyField::Totp,
+                other => return Err(format!("unknown field \"{other}\" (use password, username, url or totp)")),
             };
             (target, field)
         }

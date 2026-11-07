@@ -35,6 +35,15 @@ export function AgentRequestDialog({ request, onDone }: AgentRequestDialogProps)
 
   const ready = unmatched.every((m) => choices[m.reference]);
 
+  // A password and its 2FA code together let the program sign in without you.
+  const fieldsByLogin = new Map<string, Set<string>>();
+  for (const m of request.matches) {
+    const login = m.login_id ?? choices[m.reference];
+    if (!login) continue;
+    fieldsByLogin.set(login, (fieldsByLogin.get(login) ?? new Set()).add(m.field));
+  }
+  const bothFactors = [...fieldsByLogin.values()].some((f) => f.has("password") && f.has("totp"));
+
   const decide = async (approve: boolean) => {
     if (busy) return;
     setBusy(true);
@@ -102,6 +111,11 @@ export function AgentRequestDialog({ request, onDone }: AgentRequestDialogProps)
         </div>
         {request.chain.length > 0 && (
           <p className="meta">Started by {request.chain.join(" ← ")}</p>
+        )}
+        {bothFactors && (
+          <p className="error" role="alert">
+            This includes a password and its 2FA code, so the program can sign in as you.
+          </p>
         )}
         {request.inline_script && (
           <p className="error" role="alert">

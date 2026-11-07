@@ -2372,6 +2372,15 @@ mod tests {
             db.execute("INSERT INTO credentials (id, service, username, password_encrypted) VALUES ('c3', ?1, '', ?2)", [&sealed, &password]).unwrap();
             assert!(login_id(&db, &rig.dek, &Target::Name("aws".into())).unwrap_err().contains("2 logins"));
             assert_eq!(agent::refs::resolve(&db, &rig.dek, "encra://id/c3", None).unwrap().1.as_str(), "second");
+
+            // The 2FA code is made at resolve time; a login without 2FA is refused.
+            assert_eq!(parse("encra://aws#totp").unwrap().field, CopyField::Totp);
+            assert!(agent::refs::resolve(&db, &rig.dek, "encra://id/c3#totp", None).unwrap_err().contains("no 2FA"));
+            let secret = fields::seal(&rig.dek, "credentials", "c3", "totp_secret", "JBSWY3DPEHPK3PXPJBSWY3DP").unwrap();
+            db.execute("UPDATE credentials SET totp_secret = ?1 WHERE id = 'c3'", [&secret]).unwrap();
+            let (login, code) = agent::refs::resolve(&db, &rig.dek, "encra://id/c3#totp", None).unwrap();
+            assert_eq!(login, "c3");
+            assert!(code.len() == 6 && code.bytes().all(|b| b.is_ascii_digit()), "a six-digit code");
         }
 
         // An approval that cannot resolve sends an error, never a partial set.

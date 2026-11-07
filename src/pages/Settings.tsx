@@ -394,6 +394,7 @@ function Settings() {
                 <div className="field">
                   <span className="label">For example</span>
                   <code className="command">{"# .env.encra names a login; it holds no secret\nGH_TOKEN=encra://GitHub#password\n\nencra run --env-file .env.encra -- gh repo list"}</code>
+                  <span className="meta">After the #: password, username, url, or totp for the current 2FA code.</span>
                 </div>
               </>
             )}
