@@ -143,7 +143,7 @@ fn stored_column(db: &Connection, id: &str, column: &str) -> Result<Option<Strin
 /// the password, which could then be copied and pasted somewhere.
 fn decrypt_column(db: &Connection, key: &[u8; 32], id: &str, column: &str) -> Result<Zeroizing<String>, String> {
     match stored_column(db, id, column)? {
-        Some(value) if !value.is_empty() => vault::decrypt(key, &value).map(Zeroizing::new).map_err(|_| UNREADABLE.into()),
+        Some(value) if !value.is_empty() => vault::decrypt(key, &value).map_err(|_| UNREADABLE.into()),
         _ => Ok(Zeroizing::new(String::new())),
     }
 }

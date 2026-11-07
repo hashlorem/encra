@@ -66,7 +66,7 @@ fn decrypt_field(dek: &[u8; 32], value: &str, label: &str) -> Result<String, Str
     if value.is_empty() {
         return Ok(String::new());
     }
-    vault::decrypt(dek, value).map_err(|_| {
+    vault::decrypt_to_string(dek, value).map_err(|_| {
         format!(
             "failed to decrypt {label} while building the backup — the vault may be corrupted"
         )
@@ -233,7 +233,7 @@ fn require_ciphertext(dek: &[u8; 32], value: &str, label: &str) -> Result<(), St
     if value.is_empty() {
         return Ok(());
     }
-    vault::decrypt(dek, value).map(|_| ()).map_err(|_| {
+    vault::decrypt_to_string(dek, value).map(|_| ()).map_err(|_| {
         format!(
             "{label} cannot be decrypted with this vault's key. This backup was made by a \
              different vault and cannot be restored here — re-export a backup from the \

@@ -29,8 +29,11 @@ pub async fn check_password(password: &str) -> Result<u32, String> {
         .build()
         .map_err(|e| e.to_string())?;
 
+    // Padding makes every range response a similar size, so the size of the
+    // encrypted reply does not hint at which prefix was asked for.
     let mut response = client
         .get(&url)
+        .header("Add-Padding", "true")
         .send()
         .await
         .map_err(|e| format!("HIBP API unreachable: {}", e))?;
@@ -52,10 +55,16 @@ pub async fn check_password(password: &str) -> Result<u32, String> {
     }
     let body = String::from_utf8_lossy(&body_bytes);
 
-    // Parse: each line is "SUFFIX:COUNT"
+    count_for_suffix(&body, suffix)
+}
+
+/// The breach count for `suffix` in a range response, or 0 if it is absent.
+/// Padding adds made-up suffixes with a count of 0, which read the same as
+/// "not found".
+fn count_for_suffix(body: &str, suffix: &str) -> Result<u32, String> {
     for line in body.lines() {
         if let Some((hash_suffix, count_str)) = line.split_once(':') {
-            if hash_suffix == suffix {
+            if hash_suffix.eq_ignore_ascii_case(suffix) {
                 return count_str
                     .trim()
                     .parse::<u32>()
@@ -63,8 +72,7 @@ pub async fn check_password(password: &str) -> Result<u32, String> {
             }
         }
     }
-
-    Ok(0) // not found — password is safe
+    Ok(0)
 }
 
 #[cfg(test)]
@@ -74,6 +82,24 @@ mod tests {
     // These two tests make real network calls to api.pwnedpasswords.com. They are
     // #[ignore]d so `cargo test` stays offline and deterministic; run them with
     // `cargo test -- --ignored` when a live check is actually wanted.
+
+    const SUFFIX: &str = "1E4C9B93F3F0682250B6CF8331B7EE68FD8";
+
+    #[test]
+    fn test_count_for_suffix_reads_padded_responses() {
+        // A real hit, a padding line (count 0) and Windows line endings.
+        let body = format!("0018A45C4D1DEF81644B54AB7F969B88D65:1\r\n{SUFFIX}:3861\r\n00D4F6E8FA6EECAD2A3AA415EEC418D38EC:0\r\n");
+        assert_eq!(count_for_suffix(&body, SUFFIX).unwrap(), 3861);
+        assert_eq!(count_for_suffix(&body, &SUFFIX.to_lowercase()).unwrap(), 3861);
+        assert_eq!(count_for_suffix(&body, "00D4F6E8FA6EECAD2A3AA415EEC418D38EC").unwrap(), 0, "padding reads as not found");
+        assert_eq!(count_for_suffix(&body, "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF").unwrap(), 0);
+    }
+
+    #[test]
+    fn test_count_for_suffix_rejects_a_garbled_count() {
+        let body = format!("{SUFFIX}:lots\r\n");
+        assert!(count_for_suffix(&body, SUFFIX).is_err());
+    }
 
     #[tokio::test]
     #[ignore = "live network call to the HIBP API"]

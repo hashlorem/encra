@@ -103,6 +103,36 @@ fn legacy_database_candidates(current_dir: &Path) -> Vec<PathBuf> {
     candidates
 }
 
+/// Owner-only access to the vault folder (0700) and database (0600), set on
+/// every launch. A vault copied in by the brand migration is created with the
+/// default 0644, so this fixes it too. SQLite's side files inherit the
+/// database's mode, and are covered here in case they already exist.
+#[cfg(unix)]
+fn restrict_permissions(db_path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    let set = |path: &Path, mode: u32| {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+            .map_err(|e| format!("failed to restrict permissions on {}: {e}", path.display()))
+    };
+    if let Some(dir) = db_path.parent() {
+        set(dir, 0o700)?;
+    }
+    for suffix in ["", "-journal", "-wal", "-shm"] {
+        let mut name = db_path.as_os_str().to_owned();
+        name.push(suffix);
+        let path = PathBuf::from(name);
+        if path.exists() {
+            set(&path, 0o600)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn restrict_permissions(_db_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
 fn vault_path(app: &tauri::AppHandle) -> Result<PathBuf, String> {
     // Debug builds only: lets a dev run use a throwaway vault, so smoke tests
     // never touch the real one. `debug_assertions` is off in release builds,
@@ -131,7 +161,7 @@ const MAX_LONG_FIELD_CHARS: usize = 65_536;
 /// Check vault is unlocked — returns the DEK in a guard that wipes it on drop.
 fn require_unlocked(state: &AppState) -> Result<Dek, String> {
     let key = state.encryption_key.lock().map_err(|e| e.to_string())?;
-    key.map(Dek::new).ok_or_else(|| "vault is locked".into())
+    key.as_ref().map(|dek| Dek::new(**dek)).ok_or_else(|| "vault is locked".into())
 }
 
 fn require_db(state: &AppState) -> Result<std::sync::MutexGuard<'_, Connection>, String> {
@@ -442,9 +472,10 @@ fn vault_status(state: tauri::State<AppState>) -> Result<&'static str, String> {
 #[tauri::command]
 fn create_vault(state: tauri::State<AppState>, master_password: String) -> Result<(), String> {
     let db = require_db(&state)?;
-    let dek = create_vault_impl(&db, &master_password)?;
+    let mut dek = create_vault_impl(&db, &master_password)?;
     let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
-    *key = Some(dek);
+    *key = Some(Dek::new(dek));
+    dek.zeroize();
     Ok(())
 }
 
@@ -457,9 +488,10 @@ fn unlock_vault(state: tauri::State<AppState>, master_password: String) -> Resul
         VaultKind::Fresh => Err("no vault has been created yet".into()),
         VaultKind::Legacy(legacy_hash) => migrate_legacy_vault(&db, &state, &master_password, &legacy_hash),
         VaultKind::Current { .. } => match unlock_current_vault(&db, &master_password)? {
-            Some(dek) => {
+            Some(mut dek) => {
                 let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
-                *key = Some(dek);
+                *key = Some(Dek::new(dek));
+                dek.zeroize();
                 Ok(true)
             }
             None => Ok(false),
@@ -517,7 +549,7 @@ fn migrate_legacy_vault(
     // Decrypt passwords with legacy key
     let mut decrypted_passwords: Vec<String> = Vec::new();
     for cred in &raw_creds {
-        let plain = vault::decrypt(&legacy_key, &cred.password_encrypted)?;
+        let plain = vault::decrypt_to_string(&legacy_key, &cred.password_encrypted)?;
         decrypted_passwords.push(plain);
     }
 
@@ -560,7 +592,7 @@ fn migrate_legacy_vault(
 
     {
         let mut ek = state.encryption_key.lock().map_err(|e| e.to_string())?;
-        *ek = Some(new_dek);
+        *ek = Some(Dek::new(new_dek));
     }
     activity::log_action(db, "migration", "legacy vault migrated to DEK model");
     Ok(true)
@@ -647,11 +679,7 @@ fn lock_vault(state: tauri::State<AppState>, clipboard: tauri::State<Arc<Clipboa
     let db = require_db(&state)?;
     activity::log_action(&db, "lock", "vault locked");
     let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
-    // Overwrite the key material in place before dropping the reference to it,
-    // rather than just releasing it back to the allocator.
-    if let Some(dek) = key.as_mut() {
-        dek.zeroize();
-    }
+    // Dropping the Dek overwrites the key bytes in place.
     *key = None;
     Ok(())
 }
@@ -731,9 +759,9 @@ fn get_projects(state: tauri::State<AppState>) -> Result<Vec<journal::Project>, 
         let enc_method: String = row.get(4)?;
         Ok(journal::Project {
             id: row.get(0)?, name: row.get(1)?,
-            description: vault::decrypt(&key, &enc_desc).unwrap_or_default(),
-            target: vault::decrypt(&key, &enc_target).unwrap_or_default(),
-            methodology: vault::decrypt(&key, &enc_method).unwrap_or_default(),
+            description: vault::decrypt_to_string(&key, &enc_desc).unwrap_or_default(),
+            target: vault::decrypt_to_string(&key, &enc_target).unwrap_or_default(),
+            methodology: vault::decrypt_to_string(&key, &enc_method).unwrap_or_default(),
             status: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)?,
         })
     })
@@ -792,8 +820,8 @@ fn get_entries(state: tauri::State<AppState>, project_id: String) -> Result<Vec<
         let enc_content: String = row.get(3)?;
         Ok(journal::JournalEntry {
             id: row.get(0)?, project_id: row.get(1)?,
-            title: vault::decrypt(&key, &enc_title).unwrap_or_else(|_| "[decryption failed]".into()),
-            content: vault::decrypt(&key, &enc_content).unwrap_or_else(|_| "[decryption failed]".into()),
+            title: vault::decrypt_to_string(&key, &enc_title).unwrap_or_else(|_| "[decryption failed]".into()),
+            content: vault::decrypt_to_string(&key, &enc_content).unwrap_or_else(|_| "[decryption failed]".into()),
             entry_type: row.get(4)?, severity: row.get(5)?, created_at: row.get(6)?,
         })
     })
@@ -917,10 +945,10 @@ fn get_kb_entries(state: tauri::State<AppState>) -> Result<Vec<kb::KBEntry>, Str
         let enc_tags: String = row.get(4)?;
         Ok(kb::KBEntry {
             id: row.get(0)?,
-            title: vault::decrypt(&key, &enc_title).unwrap_or_else(|_| "[decryption failed]".into()),
-            command: vault::decrypt(&key, &enc_cmd).unwrap_or_else(|_| "[decryption failed]".into()),
-            description: vault::decrypt(&key, &enc_desc).unwrap_or_else(|_| "[decryption failed]".into()),
-            tags: vault::decrypt(&key, &enc_tags).unwrap_or_else(|_| "[decryption failed]".into()),
+            title: vault::decrypt_to_string(&key, &enc_title).unwrap_or_else(|_| "[decryption failed]".into()),
+            command: vault::decrypt_to_string(&key, &enc_cmd).unwrap_or_else(|_| "[decryption failed]".into()),
+            description: vault::decrypt_to_string(&key, &enc_desc).unwrap_or_else(|_| "[decryption failed]".into()),
+            tags: vault::decrypt_to_string(&key, &enc_tags).unwrap_or_else(|_| "[decryption failed]".into()),
             category: row.get(5)?, created_at: row.get(6)?,
         })
     })
@@ -977,7 +1005,7 @@ fn import_backup(state: tauri::State<AppState>, bundled: String, backup_password
         .map_err(|e| e.to_string())?;
 
     let mut wrapping_key = vault::derive_key(&backup_password, &salt)?;
-    let json = vault::decrypt(&wrapping_key, payload)?;
+    let json = vault::decrypt_to_string(&wrapping_key, payload)?;
     wrapping_key.zeroize();
     let data: backup::VaultBackup = serde_json::from_str(&json).map_err(|e| e.to_string())?;
 
@@ -1039,7 +1067,7 @@ fn reset_master_password(state: tauri::State<AppState>, recovery_code: String, n
     // Set in-memory DEK and unlock the app
     {
         let mut ek = state.encryption_key.lock().map_err(|e| e.to_string())?;
-        *ek = Some(dek);
+        *ek = Some(Dek::new(dek));
     }
     dek.zeroize();
 
@@ -1062,6 +1090,11 @@ fn main() {
             }
 
             let conn = vault::init_db(&db_path).map_err(std::io::Error::other)?;
+            // Defence in depth only: a filesystem that refuses chmod must not
+            // keep anyone out of their own vault.
+            if let Err(error) = restrict_permissions(&db_path) {
+                eprintln!("Encra could not restrict vault permissions: {error}");
+            }
             journal::init_journal_tables(&conn).map_err(std::io::Error::other)?;
             kb::init_kb_tables(&conn).map_err(std::io::Error::other)?;
             activity::init_activity_table(&conn).map_err(std::io::Error::other)?;
@@ -1260,7 +1293,7 @@ mod tests {
         let stored_pw: String = conn
             .query_row("SELECT password_encrypted FROM credentials WHERE id = 'c1'", [], |row| row.get(0))
             .unwrap();
-        assert_eq!(vault::decrypt(&unwrapped, &stored_pw).unwrap(), "gh_p@$$w0rd");
+        assert_eq!(vault::decrypt_to_string(&unwrapped, &stored_pw).unwrap(), "gh_p@$$w0rd");
         drop(conn);
         std::fs::remove_dir_all(root).unwrap();
     }
@@ -1476,6 +1509,33 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_restrict_permissions_makes_vault_owner_only() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = migration_test_dir("perms");
+        let data_dir = dir.join("com.encra.desktop");
+        std::fs::create_dir_all(&data_dir).unwrap();
+        let db_path = data_dir.join(CURRENT_DATABASE_NAME);
+        create_marker_database(&db_path, "perm-check");
+        let journal = data_dir.join(format!("{CURRENT_DATABASE_NAME}-journal"));
+        std::fs::write(&journal, b"").unwrap();
+        // The modes a fresh copy gets from a default umask.
+        std::fs::set_permissions(&data_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+        std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        std::fs::set_permissions(&journal, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        restrict_permissions(&db_path).unwrap();
+
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&data_dir), 0o700);
+        assert_eq!(mode(&db_path), 0o600);
+        assert_eq!(mode(&journal), 0o600);
+        // Still readable by its owner afterwards.
+        assert_eq!(read_marker_after_reopen(&db_path), "perm-check");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn test_legacy_key_derivation_compatibility() {
         let legacy_salt = [0x4b, 0x65, 0x79, 0x52, 0x50, 0x54, 0x30, 0x31];
@@ -1673,7 +1733,7 @@ mod tests {
             let final_dek = vault::unwrap_dek(&enc_dek, &wrap_key).unwrap();
 
             let enc: String = conn.query_row("SELECT password_encrypted FROM credentials WHERE id='id1'", [], |r| r.get(0)).unwrap();
-            let dec = vault::decrypt(&final_dek, &enc).unwrap();
+            let dec = vault::decrypt_to_string(&final_dek, &enc).unwrap();
             assert_eq!(dec, test_cred, "new password must decrypt after reopen");
 
             // Old password must fail
@@ -1750,15 +1810,15 @@ mod tests {
         let plaintext = "my-secret-password";
         let encrypted = vault::encrypt(&legacy_key, plaintext).unwrap();
 
-        let decrypted = vault::decrypt(&legacy_key, &encrypted).unwrap();
+        let decrypted = vault::decrypt_to_string(&legacy_key, &encrypted).unwrap();
         assert_eq!(decrypted, plaintext);
 
         let new_dek = vault::generate_dek();
         let re_encrypted = vault::encrypt(&new_dek, &decrypted).unwrap();
-        let re_decrypted = vault::decrypt(&new_dek, &re_encrypted).unwrap();
+        let re_decrypted = vault::decrypt_to_string(&new_dek, &re_encrypted).unwrap();
         assert_eq!(re_decrypted, plaintext);
 
-        let result = vault::decrypt(&legacy_key, &re_encrypted);
+        let result = vault::decrypt_to_string(&legacy_key, &re_encrypted);
         assert!(result.is_err(), "legacy key must not decrypt new DEK ciphertext");
     }
 
@@ -1905,7 +1965,7 @@ mod tests {
                 .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?))).unwrap()
                 .collect::<Result<Vec<_>,_>>().unwrap();
 
-            let dec = |v: &str| vault::decrypt(&dek, v).unwrap();
+            let dec = |v: &str| vault::decrypt_to_string(&dek, v).unwrap();
 
             assert_eq!(creds.len(), 3);
             let gh = creds.iter().find(|c| c.0 == "github.com").unwrap();
@@ -2066,7 +2126,7 @@ mod tests {
         // Reopen and confirm every field decrypts with the DESTINATION key.
         {
             let conn = Connection::open(&destination).unwrap();
-            let dec = |v: &str| vault::decrypt(&destination_dek, v).unwrap();
+            let dec = |v: &str| vault::decrypt_to_string(&destination_dek, v).unwrap();
 
             let count: i64 = conn.query_row("SELECT COUNT(*) FROM credentials", [], |r| r.get(0)).unwrap();
             assert_eq!(count, 2, "both credentials must import");
@@ -2105,9 +2165,9 @@ mod tests {
 
             // Proof that re-encryption really happened: the source key must not
             // be able to read anything the destination now stores.
-            assert!(vault::decrypt(&source_dek, &username).is_err(), "source key must not read imported credentials");
-            assert!(vault::decrypt(&source_dek, &title).is_err(), "source key must not read imported journal data");
-            assert!(vault::decrypt(&source_dek, &kb_title).is_err(), "source key must not read imported commands");
+            assert!(vault::decrypt_to_string(&source_dek, &username).is_err(), "source key must not read imported credentials");
+            assert!(vault::decrypt_to_string(&source_dek, &title).is_err(), "source key must not read imported journal data");
+            assert!(vault::decrypt_to_string(&source_dek, &kb_title).is_err(), "source key must not read imported commands");
         }
 
         std::fs::remove_dir_all(dir).unwrap();

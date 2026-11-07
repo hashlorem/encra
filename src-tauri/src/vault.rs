@@ -8,7 +8,7 @@ use serde::Deserialize;
 use std::ops::Deref;
 use std::path::Path;
 use std::sync::Mutex;
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::util::os_rng;
 
@@ -55,7 +55,9 @@ pub struct CredentialInput {
 
 pub struct AppState {
     pub db: Mutex<Connection>,
-    pub encryption_key: Mutex<Option<[u8; 32]>>,
+    /// The unlocked data key. `Dek` wipes itself on drop, so clearing or
+    /// replacing it never leaves the old bytes behind.
+    pub encryption_key: Mutex<Option<Dek>>,
 }
 
 // --- DB setup ---
@@ -184,8 +186,9 @@ pub fn encrypt(key: &[u8; 32], plaintext: &str) -> Result<String, String> {
     Ok(base64::engine::general_purpose::STANDARD.encode(&combined))
 }
 
-/// Decrypt ciphertext with the DEK
-pub fn decrypt(key: &[u8; 32], encoded: &str) -> Result<String, String> {
+/// Decrypt ciphertext with the DEK. The plaintext, and every intermediate
+/// buffer, is wiped when dropped.
+pub fn decrypt(key: &[u8; 32], encoded: &str) -> Result<Zeroizing<String>, String> {
     let combined = base64::engine::general_purpose::STANDARD
         .decode(encoded)
         .map_err(|e| e.to_string())?;
@@ -198,11 +201,19 @@ pub fn decrypt(key: &[u8; 32], encoded: &str) -> Result<String, String> {
     let nonce = Nonce::from_slice(nonce_bytes);
     let cipher = Aes256Gcm::new_from_slice(key).map_err(|e| e.to_string())?;
 
-    let plaintext = cipher
-        .decrypt(nonce, ciphertext)
-        .map_err(|_| "decryption failed — wrong key or corrupted data".to_string())?;
+    let plaintext = Zeroizing::new(
+        cipher
+            .decrypt(nonce, ciphertext)
+            .map_err(|_| "decryption failed — wrong key or corrupted data".to_string())?,
+    );
+    let text = std::str::from_utf8(&plaintext).map_err(|_| "decrypted data is not valid text".to_string())?;
+    Ok(Zeroizing::new(text.to_owned()))
+}
 
-    String::from_utf8(plaintext).map_err(|e| e.to_string())
+/// Decrypt a value that is about to leave Rust (for the webview or a
+/// backup). The returned copy is plain by necessity; the intermediates are not.
+pub fn decrypt_to_string(key: &[u8; 32], encoded: &str) -> Result<String, String> {
+    decrypt(key, encoded).map(|text| text.as_str().to_owned())
 }
 
 /// Hash a password for verification ONLY — uses Argon2 PHC format, non-reversible
@@ -231,7 +242,7 @@ pub fn verify_password(password: &str, hash: &str) -> Result<bool, String> {
 /// Decrypt an optional string field with the DEK. None → None, decryption failure → None.
 pub fn decrypt_opt(key: &[u8; 32], value: &Option<String>) -> Option<String> {
     match value {
-        Some(v) if !v.is_empty() => decrypt(key, v).ok(),
+        Some(v) if !v.is_empty() => decrypt_to_string(key, v).ok(),
         _ => None,
     }
 }
