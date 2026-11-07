@@ -392,8 +392,8 @@ function Settings() {
                   </div>
                 </div>
                 <div className="field">
-                  <span className="label">Then</span>
-                  <code className="command">{"echo 'TOKEN=encra://GitHub#password' > .env\nencra run --env-file .env -- ./deploy.sh"}</code>
+                  <span className="label">For example</span>
+                  <code className="command">{"# .env.encra names a login; it holds no secret\nGH_TOKEN=encra://GitHub#password\n\nencra run --env-file .env.encra -- gh repo list"}</code>
                 </div>
               </>
             )}

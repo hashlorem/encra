@@ -1222,8 +1222,17 @@ fieldset {
 .agent-list {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  font-size: 15px;
+  border-top: 1px solid var(--rule);
+}
+
+.agent-list > li {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 4px 16px;
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule);
 }
 
 /* ---------- Narrow windows ---------- */

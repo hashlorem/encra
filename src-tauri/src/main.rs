@@ -382,6 +382,7 @@ fn delete_credential(state: tauri::State<AppState>, id: String) -> Result<(), St
     let db = require_db(&state)?;
     in_transaction(&db, || {
         db.execute("DELETE FROM credentials WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
+        agent::refs::forget_login(&db, &id)?;
         activity::log_action(&db, "credential_delete", "deleted a login");
         Ok(())
     })?;
@@ -1273,10 +1274,27 @@ fn set_agent_access(
     Ok(agent_status_of(&db, &hub))
 }
 
+/// A waiting request plus how each reference matches your logins. The
+/// matches are for you only; the caller never receives them.
+#[derive(serde::Serialize)]
+struct PendingView {
+    #[serde(flatten)]
+    info: agent::server::PendingInfo,
+    matches: Vec<agent::refs::Match>,
+}
+
 #[tauri::command]
-fn agent_pending(state: tauri::State<AppState>, hub: tauri::State<Arc<agent::server::Hub>>) -> Result<Vec<agent::server::PendingInfo>, String> {
-    let _key = require_unlocked(&state)?;
-    Ok(hub.pending())
+fn agent_pending(state: tauri::State<AppState>, hub: tauri::State<Arc<agent::server::Hub>>) -> Result<Vec<PendingView>, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    Ok(hub
+        .pending()
+        .into_iter()
+        .map(|info| PendingView {
+            matches: info.references.iter().map(|r| agent::refs::preview(&db, &key, r)).collect(),
+            info,
+        })
+        .collect())
 }
 
 /// Answer one waiting request. Only reachable unlocked, so a request can
@@ -1287,15 +1305,29 @@ fn agent_decide(
     hub: tauri::State<Arc<agent::server::Hub>>,
     id: String,
     approve: bool,
+    choices: Option<std::collections::HashMap<String, String>>,
+    remember: Option<bool>,
 ) -> Result<(), String> {
     let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
-    let result = decide_agent_request(&db, &key, &hub, &id, approve);
+    let choices = choices.unwrap_or_default();
+    let result = decide_agent_request(&db, &key, &hub, &id, approve, &choices, remember.unwrap_or(false));
     seal_log(&db, &key);
     result
 }
 
-fn decide_agent_request(db: &Connection, key: &[u8; 32], hub: &agent::server::Hub, id: &str, approve: bool) -> Result<(), String> {
+/// `choices` maps a reference to a login the approver picked for it (for a
+/// name that matched nothing, or more than one). With `remember`, a picked
+/// login is saved as what that name means from now on.
+fn decide_agent_request(
+    db: &Connection,
+    key: &[u8; 32],
+    hub: &agent::server::Hub,
+    id: &str,
+    approve: bool,
+    choices: &std::collections::HashMap<String, String>,
+    remember: bool,
+) -> Result<(), String> {
     use agent::server::Decision;
     let (info, reply) = hub.take(id).ok_or("that request is no longer waiting")?;
     let place = format!("{} in {}", info.executable, info.cwd);
@@ -1308,7 +1340,8 @@ fn decide_agent_request(db: &Connection, key: &[u8; 32], hub: &agent::server::Hu
     let mut values = Vec::with_capacity(info.references.len());
     let mut given = Vec::with_capacity(info.references.len());
     for reference in &info.references {
-        match agent::refs::resolve(db, key, reference) {
+        let chosen = choices.get(reference).map(String::as_str);
+        match agent::refs::resolve(db, key, reference, chosen) {
             Ok((login_id, value)) => {
                 let field = agent::refs::parse(reference).map(|r| agent::refs::field_name(r.field)).unwrap_or("?");
                 // The login's id, not its name: the log is readable while sealed.
@@ -1319,6 +1352,13 @@ fn decide_agent_request(db: &Connection, key: &[u8; 32], hub: &agent::server::Hu
                 let _ = reply.send(Decision::Fail(error.clone()));
                 activity::log_action(db, "agent_failed", &format!("approved but a reference could not be resolved: {place}"));
                 return Err(error);
+            }
+        }
+    }
+    if remember {
+        for (reference, login) in choices {
+            if let Ok(agent::refs::Reference { target: agent::refs::Target::Name(name), .. }) = agent::refs::parse(reference) {
+                agent::refs::remember(db, key, &name, login)?;
             }
         }
     }
@@ -1360,6 +1400,7 @@ fn main() {
             journal::init_journal_tables(&conn).map_err(std::io::Error::other)?;
             kb::init_kb_tables(&conn).map_err(std::io::Error::other)?;
             activity::init_activity_table(&conn).map_err(std::io::Error::other)?;
+            agent::refs::init_alias_table(&conn).map_err(std::io::Error::other)?;
 
             // Enable foreign keys
             conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -2104,6 +2145,7 @@ mod tests {
         let (dir, path, dek) = format_2_vault(label);
         let conn = vault::init_db(&path).unwrap();
         bring_up_to_date(&conn, V2_PASSWORD, &dek).unwrap();
+        agent::refs::init_alias_table(&conn).unwrap();
         let db = Arc::new(Mutex::new(conn));
         let log_db = Arc::clone(&db);
         let hub = agent::server::Hub::new(
@@ -2178,7 +2220,7 @@ mod tests {
         assert_eq!(info.agent, "test-agent");
         assert!(!info.inline_script);
 
-        decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true).unwrap();
+        decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true, &Default::default(), false).unwrap();
         let response = client.join().unwrap().unwrap();
         let (password, username) = match &response {
             agent::protocol::Response::Approved(_) => (
@@ -2192,7 +2234,7 @@ mod tests {
 
         // One decision only: the request is gone.
         assert!(rig.hub.pending().is_empty());
-        assert!(decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true).is_err());
+        assert!(decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true, &Default::default(), false).is_err());
 
         let actions = rig.actions();
         assert!(actions.contains(&"agent_request".into()) && actions.contains(&"agent_approved".into()));
@@ -2222,7 +2264,7 @@ mod tests {
         let rig = agent_rig("agent-deny", agent::server::REQUEST_TIMEOUT);
         let client = rig.ask_in_background(&["encra://github.com"]);
         let info = rig.wait_for_pending();
-        decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, false).unwrap();
+        decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, false, &Default::default(), false).unwrap();
         assert!(matches!(client.join().unwrap().unwrap(), agent::protocol::Response::Denied));
         assert!(rig.actions().contains(&"agent_denied".into()));
 
@@ -2280,14 +2322,54 @@ mod tests {
             let password = fields::seal(&rig.dek, "credentials", "c3", "password_encrypted", "second").unwrap();
             db.execute("INSERT INTO credentials (id, service, username, password_encrypted) VALUES ('c3', ?1, '', ?2)", [&sealed, &password]).unwrap();
             assert!(login_id(&db, &rig.dek, &Target::Name("aws".into())).unwrap_err().contains("2 logins"));
-            assert_eq!(agent::refs::resolve(&db, &rig.dek, "encra://id/c3").unwrap().1.as_str(), "second");
+            assert_eq!(agent::refs::resolve(&db, &rig.dek, "encra://id/c3", None).unwrap().1.as_str(), "second");
         }
 
         // An approval that cannot resolve sends an error, never a partial set.
         let client = rig.ask_in_background(&["encra://github.com", "encra://aws"]);
         let info = rig.wait_for_pending();
-        assert!(decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true).is_err());
+        assert!(decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true, &Default::default(), false).is_err());
         assert!(matches!(client.join().unwrap().unwrap(), agent::protocol::Response::Error(_)));
+        rig.finish();
+    }
+
+    #[test]
+    fn test_agent_picked_and_remembered_logins() {
+        let rig = agent_rig("agent-pick", agent::server::REQUEST_TIMEOUT);
+        let preview = |r: &str| agent::refs::preview(&rig.db.lock().unwrap(), &rig.dek, r);
+        assert_eq!(preview("encra://github.com").status, "found");
+        assert_eq!(preview("encra://github.com").login.as_deref(), Some("github.com"));
+        assert_eq!(preview("encra://GitHub").status, "missing");
+
+        // The approver picks "github.com" for "GitHub" and remembers it.
+        let client = rig.ask_in_background(&["encra://GitHub#password"]);
+        let info = rig.wait_for_pending();
+        let choices = std::collections::HashMap::from([("encra://GitHub#password".to_string(), "c1".to_string())]);
+        decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true, &choices, true).unwrap();
+        assert_eq!(approved_value(client.join().unwrap().unwrap(), "encra://GitHub#password"), "gh_p@$$w0rd");
+
+        // Next time "GitHub" resolves on its own, and the saved name is sealed.
+        let found = preview("encra://GitHub#username");
+        assert_eq!((found.status, found.login_id.as_deref()), ("found", Some("c1")));
+        let stored: String = rig.db.lock().unwrap().query_row("SELECT name FROM agent_aliases", [], |r| r.get(0)).unwrap();
+        assert!(vault::is_bound(&stored) && !stored.contains("GitHub"));
+
+        // A pick that isn't a real login is refused, and sends nothing.
+        let client = rig.ask_in_background(&["encra://nope"]);
+        let info = rig.wait_for_pending();
+        let bogus = std::collections::HashMap::from([("encra://nope".to_string(), "not-a-login".to_string())]);
+        assert!(decide_agent_request(&rig.db.lock().unwrap(), &rig.dek, &rig.hub, &info.id, true, &bogus, true).is_err());
+        assert!(matches!(client.join().unwrap().unwrap(), agent::protocol::Response::Error(_)));
+
+        // Deleting the login drops its remembered match.
+        {
+            let db = rig.db.lock().unwrap();
+            db.execute("DELETE FROM credentials WHERE id = 'c1'", []).unwrap();
+            agent::refs::forget_login(&db, "c1").unwrap();
+            let left: i64 = db.query_row("SELECT COUNT(*) FROM agent_aliases", [], |r| r.get(0)).unwrap();
+            assert_eq!(left, 0);
+        }
+        assert_eq!(preview("encra://GitHub").status, "missing");
         rig.finish();
     }
 

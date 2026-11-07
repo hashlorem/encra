@@ -7,9 +7,11 @@
 //! Names match exactly. A missing or ambiguous name is refused, never guessed.
 
 use rusqlite::Connection;
+use serde::Serialize;
 use zeroize::Zeroizing;
 
 use crate::credentials::{self, CopyField};
+use crate::fields;
 
 pub const SCHEME: &str = "encra://";
 
@@ -64,9 +66,61 @@ pub fn parse(text: &str) -> Result<Reference, String> {
     Ok(Reference { target, field })
 }
 
-/// Find the one login a reference means.
+// ===== Remembered matches =====
+//
+// When a reference's name doesn't match a login ("GitHub" vs "Github h"), the
+// approver picks one and can remember it. The name is sealed like any other
+// field: which accounts an agent asks for is private too.
+
+const ALIASES: &str = "agent_aliases";
+
+pub fn init_alias_table(db: &Connection) -> Result<(), String> {
+    db.execute_batch("CREATE TABLE IF NOT EXISTS agent_aliases (id TEXT PRIMARY KEY, name TEXT NOT NULL, login_id TEXT NOT NULL)")
+        .map_err(|e| e.to_string())
+}
+
+fn aliases(db: &Connection, key: &[u8; 32]) -> Result<Vec<(String, String, String)>, String> {
+    let mut stmt = db.prepare("SELECT id, name, login_id FROM agent_aliases").map_err(|e| e.to_string())?;
+    let rows: Vec<(String, String, String)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows
+        .into_iter()
+        .filter_map(|(id, name, login)| fields::open_to_string(key, ALIASES, &id, "name", &name).ok().map(|name| (id, name, login)))
+        .collect())
+}
+
+/// Remember that `name` means `login_id`, replacing any earlier match.
+pub fn remember(db: &Connection, key: &[u8; 32], name: &str, login_id: &str) -> Result<(), String> {
+    for (id, existing, _) in aliases(db, key)? {
+        if existing == name {
+            db.execute("DELETE FROM agent_aliases WHERE id = ?1", [&id]).map_err(|e| e.to_string())?;
+        }
+    }
+    let id = crate::util::uuid_v4();
+    let sealed = fields::seal(key, ALIASES, &id, "name", name)?;
+    db.execute("INSERT INTO agent_aliases (id, name, login_id) VALUES (?1, ?2, ?3)", rusqlite::params![id, sealed, login_id])
+        .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Forget every remembered match that points at a login (it was deleted).
+pub fn forget_login(db: &Connection, login_id: &str) -> Result<(), String> {
+    db.execute("DELETE FROM agent_aliases WHERE login_id = ?1", [login_id]).map(|_| ()).map_err(|e| e.to_string())
+}
+
+/// Find the one login a reference means. A remembered match wins over an
+/// exact name, as long as its login still exists.
 pub fn login_id(db: &Connection, key: &[u8; 32], target: &Target) -> Result<String, String> {
     let logins = credentials::list_summaries(db, key)?;
+    if let Target::Name(name) = target {
+        let remembered = aliases(db, key)?.into_iter().find(|(_, alias, _)| alias == name).map(|(_, _, login)| login);
+        if let Some(login) = remembered.filter(|login| logins.iter().any(|c| &c.id == login)) {
+            return Ok(login);
+        }
+    }
     let matches: Vec<&credentials::CredentialSummary> = match target {
         Target::Id(id) => logins.iter().filter(|c| &c.id == id).collect(),
         Target::Name(name) => logins.iter().filter(|c| &c.service == name).collect(),
@@ -80,10 +134,41 @@ pub fn login_id(db: &Connection, key: &[u8; 32], target: &Target) -> Result<Stri
     }
 }
 
-/// The value a reference points at, plus the login id it came from (for the log).
-pub fn resolve(db: &Connection, key: &[u8; 32], text: &str) -> Result<(String, Zeroizing<String>), String> {
+/// The value a reference points at, plus the login id it came from (for the
+/// log). `chosen` is a login the approver picked in the dialog, which wins.
+pub fn resolve(db: &Connection, key: &[u8; 32], text: &str, chosen: Option<&str>) -> Result<(String, Zeroizing<String>), String> {
     let reference = parse(text)?;
-    let id = login_id(db, key, &reference.target)?;
+    let id = match chosen {
+        Some(id) => login_id(db, key, &Target::Id(id.to_string()))?,
+        None => login_id(db, key, &reference.target)?,
+    };
     let value = credentials::copy_value(db, key, &id, reference.field)?;
     Ok((id, value))
+}
+
+/// How a reference resolves right now, for the approval dialog only. The
+/// caller never sees this: it names your logins.
+#[derive(Debug, Serialize, PartialEq)]
+pub struct Match {
+    pub reference: String,
+    pub field: &'static str,
+    /// "found", "missing" or "ambiguous".
+    pub status: &'static str,
+    pub login_id: Option<String>,
+    pub login: Option<String>,
+}
+
+pub fn preview(db: &Connection, key: &[u8; 32], text: &str) -> Match {
+    let parsed = parse(text);
+    let field = parsed.as_ref().map(|r| field_name(r.field)).unwrap_or("?");
+    let found = parsed.and_then(|r| login_id(db, key, &r.target));
+    let (status, login_id) = match found {
+        Ok(id) => ("found", Some(id)),
+        Err(error) if error.contains("logins are named") => ("ambiguous", None),
+        Err(_) => ("missing", None),
+    };
+    let login = login_id
+        .as_ref()
+        .and_then(|id| credentials::list_summaries(db, key).ok()?.into_iter().find(|c| &c.id == id).map(|c| c.service));
+    Match { reference: text.to_string(), field, status, login_id, login }
 }

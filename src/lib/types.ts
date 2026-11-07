@@ -102,8 +102,18 @@ export interface ChainStatus {
   problem: string | null;
 }
 
+/** How one reference matches your logins. Shown to you only. */
+export interface AgentMatch {
+  reference: string;
+  field: string;
+  status: "found" | "missing" | "ambiguous";
+  login_id: string | null;
+  login: string | null;
+}
+
 /** A waiting `encra run` request. Never carries a value. */
 export interface AgentRequest {
+  matches: AgentMatch[];
   id: string;
   agent: string;
   argv: string[];
