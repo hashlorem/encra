@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use util::{check_field, constant_time_eq, fill_random, uuid_v4, wipe_strings};
 use clipboard::ClipboardGuard;
-use credentials::{CopyField, CredentialDetail, CredentialSummary, PasswordProfile, TotpCode};
+use credentials::{CopyField, CredentialDetail, CredentialSummary, TotpCode};
 use vault::{AppState, CredentialInput, Dek};
 use rusqlite::Connection;
 use base64::Engine;
@@ -263,13 +263,6 @@ fn reveal_password(state: tauri::State<AppState>, id: String) -> Result<String, 
     let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
     credentials::reveal_password(&db, &key, &id).map(|password| password.to_string())
-}
-
-#[tauri::command]
-fn describe_password(state: tauri::State<AppState>, id: String) -> Result<PasswordProfile, String> {
-    let key = require_unlocked(&state)?;
-    let db = require_db(&state)?;
-    credentials::describe_password(&db, &key, &id)
 }
 
 #[tauri::command]
@@ -1410,7 +1403,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            list_credentials, get_credential, reveal_password, describe_password, get_totp,
+            list_credentials, get_credential, reveal_password, get_totp,
             copy_credential_field, copy_text, check_credential_breach,
             add_credential, update_credential, delete_credential,
             vault_status, create_vault, unlock_vault, lock_vault,
@@ -1802,17 +1795,18 @@ mod tests {
     }
 
     #[test]
-    fn test_describe_password_reports_shape_only() {
-        let (dir, conn, dek) = reopened_seeded_vault("cred-describe");
-        let profile = credentials::describe_password(&conn, &dek, "c1").unwrap();
-        // "gh_p@$$w0rd"
-        assert_eq!(profile, PasswordProfile { length: 11, lowercase: true, uppercase: false, digits: true, symbols: true });
-        assert!(credentials::describe_password(&conn, &dek, "missing").is_err());
+    fn test_credential_detail_says_whether_a_password_exists_and_nothing_more() {
+        let (dir, conn, dek) = reopened_seeded_vault("cred-has-password");
+        assert!(credentials::detail(&conn, &dek, "c1").unwrap().has_password);
+        let empty = fields::seal(&dek, "credentials", "c1", "password_encrypted", "").unwrap();
+        conn.execute("UPDATE credentials SET password_encrypted = ?1 WHERE id = 'c1'", [&empty]).unwrap();
+        assert!(!credentials::detail(&conn, &dek, "c1").unwrap().has_password);
+        let json = serde_json::to_string(&credentials::detail(&conn, &dek, "c2").unwrap()).unwrap();
+        assert!(!json.contains("length") && !json.contains("short12chars"));
         drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
-    #[cfg(unix)]
     #[test]
     fn test_restrict_permissions_makes_vault_owner_only() {
         use std::os::unix::fs::PermissionsExt;

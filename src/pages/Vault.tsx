@@ -5,7 +5,7 @@ import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
 import { Print } from "../components/Print";
 import { describeError } from "../lib/errors";
-import { countWord, formatDate, joinWords } from "../lib/format";
+import { formatDate } from "../lib/format";
 import { useClipboard, type CopyField } from "../lib/useClipboard";
 import {
   setTotpRolloverHandler,
@@ -17,7 +17,6 @@ import type {
   CredentialDetail,
   CredentialInput,
   CredentialSummary,
-  PasswordProfile,
   TotpCode,
 } from "../lib/types";
 
@@ -38,20 +37,6 @@ const TotpCountdown = memo(function TotpCountdown() {
   return <span className="meta">{remaining} seconds left</span>;
 });
 
-function describeShape(profile: PasswordProfile): string {
-  if (profile.length === 0) return "No password is stored for this login.";
-  const parts: string[] = [];
-  if (profile.lowercase && profile.uppercase) parts.push("upper- and lowercase letters");
-  else if (profile.lowercase) parts.push("lowercase letters");
-  else if (profile.uppercase) parts.push("capital letters");
-  if (profile.digits) parts.push("numbers");
-  if (profile.symbols) parts.push("symbols");
-  const noun = profile.length === 1 ? "character" : "characters";
-  return parts.length
-    ? `${countWord(profile.length)} ${noun}, with ${joinWords(parts)}.`
-    : `${countWord(profile.length)} ${noun}.`;
-}
-
 function Vault() {
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [loading, setLoading] = useState(true);
@@ -60,7 +45,6 @@ function Vault() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
 
   const [detail, setDetail] = useState<CredentialDetail | null>(null);
-  const [profile, setProfile] = useState<PasswordProfile | null>(null);
   const [totp, setTotp] = useState<TotpCode | null>(null);
   const [revealed, setRevealed] = useState<string | null>(null);
   const [breaches, setBreaches] = useState<Record<string, Breach>>({});
@@ -127,19 +111,14 @@ function Vault() {
     setTotp(null);
     if (!selectedId) {
       setDetail(null);
-      setProfile(null);
       return;
     }
     const request = ++detailRequest.current;
     void (async () => {
       try {
-        const [nextDetail, nextProfile] = await Promise.all([
-          invoke<CredentialDetail>("get_credential", { id: selectedId }),
-          invoke<PasswordProfile>("describe_password", { id: selectedId }),
-        ]);
+        const nextDetail = await invoke<CredentialDetail>("get_credential", { id: selectedId });
         if (request !== detailRequest.current) return;
         setDetail(nextDetail);
-        setProfile(nextProfile);
         if (nextDetail.has_totp) await loadTotp(selectedId);
       } catch (err) {
         if (request !== detailRequest.current) return;
@@ -357,7 +336,7 @@ function Vault() {
       <div className="split-main">
         {error && <p className="error" role="alert">{error}</p>}
 
-        {detail && profile && (
+        {detail && (
           <article key={detail.id} className="record stagger" aria-labelledby="record-title">
             <Print kind="arch" className="record-watermark" />
             <header className="record-head">
@@ -372,12 +351,12 @@ function Vault() {
               <dt>Password</dt>
               <dd>
                 <span key={revealed !== null ? "shown" : "hidden"} className={`fact-value secret fade${revealed !== null ? " is-revealed" : ""}`}>
-                  {revealed !== null ? revealed : "•".repeat(Math.min(Math.max(profile.length, 8), 24))}
+                  {revealed !== null ? revealed : detail.has_password ? "••••••••••••" : "None"}
                 </span>
-                <button className="btn-text" onClick={() => void reveal()} disabled={profile.length === 0}>
+                <button className="btn-text" onClick={() => void reveal()} disabled={!detail.has_password}>
                   {revealed !== null ? "Hide" : "Show"}
                 </button>
-                <button className="btn-text" onClick={() => void copy("password")} disabled={profile.length === 0}>
+                <button className="btn-text" onClick={() => void copy("password")} disabled={!detail.has_password}>
                   <CopyLabel done={copied("password")} />
                 </button>
               </dd>
@@ -435,26 +414,21 @@ function Vault() {
               )}
             </dl>
 
-            <p key={breach?.state ?? "unchecked"} className="summary fade">
-              {describeShape(profile)}{" "}
-              {profile.length > 0 && (
-                <>
-                  {!breach && "It hasn’t been checked against known breaches yet. "}
-                  {breach?.state === "checking" && "Checking known breaches… "}
-                  {breach?.state === "failed" && "The breach check couldn’t reach the service. "}
-                  {breach?.state === "done" && breach.count === 0 && "It didn’t turn up in any known breach just now. "}
-                  {breach?.state === "done" && breach.count > 0 && (
-                    <span className="error">
-                      It turned up in {breach.count.toLocaleString()} known breaches. Change it.{" "}
-                    </span>
-                  )}
-                </>
-              )}
-            </p>
+            {detail.has_password && (
+              <p key={breach?.state ?? "unchecked"} className="summary fade">
+                {!breach && "Not checked against known breaches."}
+                {breach?.state === "checking" && "Checking known breaches…"}
+                {breach?.state === "failed" && "The breach check couldn’t reach the service."}
+                {breach?.state === "done" && breach.count === 0 && "Not found in known breaches."}
+                {breach?.state === "done" && breach.count > 0 && (
+                  <span className="error">Found in {breach.count.toLocaleString()} known breaches. Change it.</span>
+                )}
+              </p>
+            )}
 
             <div className="actions">
               <button className="btn-outline" onClick={openEdit}>Edit</button>
-              {profile.length > 0 && (
+              {detail.has_password && (
                 <button
                   className="btn-text"
                   onClick={() => void checkBreach()}

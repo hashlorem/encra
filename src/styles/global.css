@@ -51,9 +51,11 @@ body,
   height: 100%;
 }
 
-/* No elastic bounce: a native window does not rubber-band. */
+/* No elastic bounce, and the page itself never scrolls: a native window
+   doesn't. Panels inside it scroll on their own (see .shell). */
 html,
 body {
+  overflow: hidden;
   overscroll-behavior: none;
 }
 
@@ -364,6 +366,7 @@ kbd,
 /* The window is a fixed frame that never scrolls. Each panel scrolls on its
    own, and only when its own content is longer than it. */
 .shell {
+  position: relative;
   display: flex;
   height: 100vh;
   overflow: hidden;
@@ -436,7 +439,11 @@ kbd,
   line-height: 1.3;
 }
 
+/* position: relative contains absolutely positioned descendants (the
+   screen-reader-only labels). Without it they sat at their natural place far
+   down the page and made the whole window scroll. */
 .workspace {
+  position: relative;
   flex: 1 1 auto;
   min-width: 0;
   height: 100%;
@@ -490,6 +497,7 @@ kbd,
 }
 
 .split-list {
+  position: relative;
   display: flex;
   flex: 0 0 340px;
   flex-direction: column;
@@ -1285,6 +1293,8 @@ fieldset {
   }
 
   /* Paper has no scroll: let the whole case flow onto as many pages as needed. */
+  html,
+  body,
   .shell,
   .workspace,
   .view,

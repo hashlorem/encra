@@ -28,6 +28,9 @@ pub struct CredentialDetail {
     pub username: String,
     pub url: String,
     pub notes: String,
+    /// Whether a password is stored. Deliberately not its length or makeup:
+    /// that would be a clue for anyone who can see the screen.
+    pub has_password: bool,
     pub has_totp: bool,
     pub created_at: String,
 }
@@ -36,16 +39,6 @@ pub struct CredentialDetail {
 pub struct TotpCode {
     pub code: String,
     pub remaining: u64,
-}
-
-/// What the record page says about a password, without the password itself.
-#[derive(Debug, Serialize, PartialEq)]
-pub struct PasswordProfile {
-    pub length: usize,
-    pub lowercase: bool,
-    pub uppercase: bool,
-    pub digits: bool,
-    pub symbols: bool,
 }
 
 /// A field the user can copy from a login.
@@ -129,6 +122,7 @@ pub fn detail(db: &Connection, key: &[u8; 32], id: &str) -> Result<CredentialDet
         username: display_field(key, &id, "username", &username),
         url: display_field(key, &id, "url", &url),
         notes: display_field(key, &id, "notes", &notes),
+        has_password: reveal_password(db, key, &id).map(|p| !p.is_empty()).unwrap_or(false),
         id,
         has_totp,
         created_at,
@@ -181,15 +175,4 @@ pub fn copy_value(db: &Connection, key: &[u8; 32], id: &str, field: CopyField) -
         return Err("that field is empty".into());
     }
     Ok(value)
-}
-
-pub fn describe_password(db: &Connection, key: &[u8; 32], id: &str) -> Result<PasswordProfile, String> {
-    let password = reveal_password(db, key, id)?;
-    Ok(PasswordProfile {
-        length: password.chars().count(),
-        lowercase: password.chars().any(|c| c.is_lowercase()),
-        uppercase: password.chars().any(|c| c.is_uppercase()),
-        digits: password.chars().any(|c| c.is_ascii_digit()),
-        symbols: password.chars().any(|c| !c.is_alphanumeric()),
-    })
 }

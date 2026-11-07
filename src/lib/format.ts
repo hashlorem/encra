@@ -40,33 +40,10 @@ export function dayLabel(date: Date, now = new Date()): string {
   return full;
 }
 
-const NUMBER_WORDS = [
-  "Zero", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine", "Ten",
-  "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen", "Seventeen", "Eighteen",
-  "Nineteen", "Twenty",
-];
-const TENS = ["", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety"];
-
-/** Spell out 0–99 for the start of a sentence; larger numbers stay digits. */
-export function countWord(n: number): string {
-  if (n < NUMBER_WORDS.length) return NUMBER_WORDS[n];
-  if (n < 100) {
-    const tens = TENS[Math.floor(n / 10)];
-    return n % 10 === 0 ? tens : `${tens}-${NUMBER_WORDS[n % 10].toLowerCase()}`;
-  }
-  return String(n);
-}
-
 /**
  * A recovery code in groups of four, for reading and writing down. The backend
  * ignores the spaces, so a code typed this way still works.
  */
 export function groupCode(code: string): string {
   return code.match(/.{1,4}/g)?.join(" ") ?? code;
-}
-
-/** "letters, numbers and symbols" from a list of parts. */
-export function joinWords(parts: string[]): string {
-  if (parts.length <= 1) return parts.join("");
-  return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }

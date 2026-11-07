@@ -16,20 +16,12 @@ export interface CredentialSummary {
 export interface CredentialDetail extends CredentialSummary {
   url: string;
   notes: string;
+  has_password: boolean;
 }
 
 export interface TotpCode {
   code: string;
   remaining: number;
-}
-
-/** Shape of a stored password, for the record summary. Not the password. */
-export interface PasswordProfile {
-  length: number;
-  lowercase: boolean;
-  uppercase: boolean;
-  digits: boolean;
-  symbols: boolean;
 }
 
 export interface CredentialInput {
