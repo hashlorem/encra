@@ -31,6 +31,11 @@ function CopyLabel({ done }: { done: boolean }) {
   return <span key={done ? "done" : "idle"} className="fade">{done ? "Copied" : "Copy"}</span>;
 }
 
+/** 123 456, or 1234 5678 for eight-digit codes. */
+function groupOtp(code: string): string {
+  return code.length === 8 ? `${code.slice(0, 4)} ${code.slice(4)}` : code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
+}
+
 /** Subscribes to the shared tick so only this line re-renders every second. */
 const TotpCountdown = memo(function TotpCountdown() {
   const remaining = useTotpRemaining();
@@ -57,6 +62,8 @@ function Vault() {
   const [totpSetup, setTotpSetup] = useState(false);
   const [totpSecret, setTotpSecret] = useState("");
   const [totpBusy, setTotpBusy] = useState(false);
+  const [totpError, setTotpError] = useState("");
+  const qrFileRef = useRef<HTMLInputElement>(null);
 
   const [pendingDelete, setPendingDelete] = useState<CredentialDetail | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -91,7 +98,7 @@ function Vault() {
     try {
       const code = await invoke<TotpCode | null>("get_totp", { id });
       setTotp(code);
-      if (code) startTotpWindow(code.remaining);
+      if (code) startTotpWindow(code.remaining, code.period);
     } catch (err) {
       setTotp(null);
       setError(describeError(err, "Could not compute the one-time code."));
@@ -246,7 +253,31 @@ function Vault() {
       setSelectedId(null);
       await loadList(id);
     } catch (err) {
-      setError(describeError(err, "Could not save that 2FA secret."));
+      setTotpError(describeError(err, "Could not save that 2FA secret."));
+    } finally {
+      setTotpBusy(false);
+    }
+  };
+
+  /** Add the code from a QR: on the clipboard, or in an image file. */
+  const readQr = async (file?: File) => {
+    if (!selectedId || totpBusy) return;
+    setTotpBusy(true);
+    setTotpError("");
+    try {
+      if (file) {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        await invoke("setup_totp_from_image", bytes, { headers: { "credential-id": selectedId } });
+      } else {
+        await invoke("setup_totp_from_clipboard", { credentialId: selectedId });
+      }
+      setTotpSetup(false);
+      setTotpSecret("");
+      const id = selectedId;
+      setSelectedId(null);
+      await loadList(id);
+    } catch (err) {
+      setTotpError(describeError(err, "Couldn’t read a 2FA code from that."));
     } finally {
       setTotpBusy(false);
     }
@@ -365,7 +396,7 @@ function Vault() {
               <dd>
                 {detail.has_totp && totp ? (
                   <>
-                    <span key={totp.code} className="otp fade">{totp.code.replace(/^(\d{3})(\d{3})$/, "$1 $2")}</span>
+                    <span key={totp.code} className="otp fade">{groupOtp(totp.code)}</span>
                     <span className="fact-value"><TotpCountdown /></span>
                     <button className="btn-text" onClick={() => void copy("totp")}>
                       <CopyLabel done={copied("totp")} />
@@ -375,7 +406,7 @@ function Vault() {
                 ) : (
                   <>
                     <span className="fact-value meta">None set up</span>
-                    <button className="btn-text" onClick={() => { setTotpSecret(""); setTotpSetup(true); }}>
+                    <button className="btn-text" onClick={() => { setTotpSecret(""); setTotpError(""); setTotpSetup(true); }}>
                       Add
                     </button>
                   </>
@@ -501,12 +532,33 @@ function Vault() {
             }}
           >
             <h2 id="totp-title">Add a one-time code</h2>
-            <p className="lead">Paste the setup key the service shows next to its QR code. It usually looks like JBSWY3DPEHPK3PXP.</p>
             <div className="field">
-              <label className="label" htmlFor="totp-secret">Setup key</label>
+              <label className="label" htmlFor="totp-secret">Setup key or otpauth:// link</label>
               <input id="totp-secret" className="input input-secret" value={totpSecret} autoFocus autoComplete="off"
-                onChange={(event) => setTotpSecret(event.target.value)} />
+                onChange={(event) => setTotpSecret(event.target.value)}
+                onPaste={(event) => {
+                  // A screenshot on the clipboard has no text: read it as a QR.
+                  if (!event.clipboardData.getData("text")) {
+                    event.preventDefault();
+                    void readQr();
+                  }
+                }} />
             </div>
+            <div className="field">
+              <span className="label">Or the QR code</span>
+              <div className="actions">
+                <button className="btn-outline" type="button" onClick={() => void readQr()} disabled={totpBusy}>Paste screenshot</button>
+                <button className="btn-text" type="button" onClick={() => qrFileRef.current?.click()} disabled={totpBusy}>Choose image…</button>
+                <input ref={qrFileRef} type="file" accept="image/png,image/jpeg" hidden
+                  onChange={(event) => {
+                    const file = event.target.files?.[0];
+                    event.target.value = "";
+                    if (file) void readQr(file);
+                  }} />
+              </div>
+              <span className="meta">⌃⇧⌘4 copies a screenshot. Delete any saved screenshot of the QR afterwards.</span>
+            </div>
+            {totpError && <p className="error" role="alert">{totpError}</p>}
             <div className="actions">
               <button className="btn" type="submit" disabled={totpBusy || !totpSecret}>{totpBusy ? "Saving…" : "Save"}</button>
               <button className="btn-text" type="button" onClick={() => setTotpSetup(false)} disabled={totpBusy}>Cancel</button>

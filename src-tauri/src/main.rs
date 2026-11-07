@@ -13,6 +13,7 @@ mod clipboard;
 mod credentials;
 mod fields;
 mod migrate;
+mod qr;
 mod util;
 
 use std::path::{Path, PathBuf};
@@ -783,12 +784,9 @@ fn lock_vault(
 
 // ===== TOTP =====
 
-#[tauri::command]
-fn setup_totp(state: tauri::State<AppState>, credential_id: String, secret: String) -> Result<(), String> {
-    let key = require_unlocked(&state)?;
-    let db = require_db(&state)?;
-    totp::validate_secret(&secret)?;
-    let encrypted = fields::seal(&key, "credentials", &credential_id, "totp_secret", &secret.trim().to_uppercase())?;
+/// Seal a login's 2FA settings. Shared by every way of adding one.
+fn store_totp(db: &Connection, key: &[u8; 32], credential_id: &str, config: &totp::Config) -> Result<(), String> {
+    let encrypted = fields::seal(key, "credentials", credential_id, "totp_secret", &config.to_stored())?;
     let updated = db.execute("UPDATE credentials SET totp_secret = ?1 WHERE id = ?2", rusqlite::params![encrypted, credential_id])
         .map_err(|e| e.to_string())?;
     if updated == 0 {
@@ -797,9 +795,39 @@ fn setup_totp(state: tauri::State<AppState>, credential_id: String, secret: Stri
     Ok(())
 }
 
+/// A setup key or an otpauth:// link, typed or pasted.
 #[tauri::command]
-fn get_totp_remaining() -> Result<u64, String> {
-    Ok(totp::remaining_seconds())
+fn setup_totp(state: tauri::State<AppState>, credential_id: String, secret: String) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let config = totp::Config::parse(&secret)?;
+    let db = require_db(&state)?;
+    store_totp(&db, &key, &credential_id, &config)
+}
+
+/// A screenshot of the QR on the clipboard. Async so decoding a large
+/// screenshot doesn't stall the window.
+#[tauri::command]
+async fn setup_totp_from_clipboard(state: tauri::State<'_, AppState>, credential_id: String) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let config = totp::Config::parse(&qr::read_code_link(&qr::from_clipboard()?)?)?;
+    let db = require_db(&state)?;
+    store_totp(&db, &key, &credential_id, &config)?;
+    qr::clear_clipboard();
+    Ok(())
+}
+
+/// An image file the person chose, sent as raw bytes with the login's id in
+/// a header.
+#[tauri::command]
+async fn setup_totp_from_image(state: tauri::State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let credential_id = request.headers().get("credential-id").and_then(|v| v.to_str().ok()).ok_or("missing login id")?.to_string();
+    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
+        return Err("expected image bytes".into());
+    };
+    let config = totp::Config::parse(&qr::read_code_link(&qr::from_encoded(bytes)?)?)?;
+    let db = require_db(&state)?;
+    store_totp(&db, &key, &credential_id, &config)
 }
 
 #[tauri::command]
@@ -1507,7 +1535,7 @@ fn main() {
             vault_status, create_vault, unlock_vault, lock_vault,
             safety_copy_exists, delete_safety_copy,
             agent_status, set_agent_access, agent_pending, agent_decide,
-            setup_totp, get_totp_remaining, remove_totp,
+            setup_totp, setup_totp_from_clipboard, setup_totp_from_image, remove_totp,
             check_hibp,
             create_project, get_projects, delete_project,
             add_entry, add_entries, get_entries, delete_entry,
@@ -3316,7 +3344,39 @@ mod tests {
         assert!(totp::validate_secret("JBSWY3DPEHPK3PXP").is_ok(), "a 16-char base32 secret (80 bits) is acceptable");
         assert!(totp::validate_secret("JBSWY3DPEHPK3PX").is_err(), "a 15-char secret is below the 80-bit floor");
         assert!(totp::validate_secret("JBSWY3DPEHPK3PXP@").is_err(), "invalid characters must be rejected");
-        assert!(totp::generate_code("").is_err(), "an empty secret must not produce a code");
+        assert!(totp::current("").is_err(), "an empty secret must not produce a code");
+    }
+
+    #[test]
+    fn test_totp_settings_survive_reopen_and_reach_agents() {
+        let (dir, path) = fresh_vault_file("totp-settings");
+        let dek = create_vault_impl(&Connection::open(&path).unwrap(), "a-long-master-password").unwrap();
+        {
+            let conn = vault::init_db(&path).unwrap();
+            let service = fields::seal(&dek, "credentials", "t1", "service", "Example").unwrap();
+            let password = fields::seal(&dek, "credentials", "t1", "password_encrypted", "pw").unwrap();
+            conn.execute("INSERT INTO credentials (id, service, username, password_encrypted) VALUES ('t1', ?1, '', ?2)", [&service, &password]).unwrap();
+            let link = totp::Config::parse("otpauth://totp/Example:me?secret=JBSWY3DPEHPK3PXP&algorithm=SHA256&digits=8&period=60").unwrap();
+            store_totp(&conn, &dek, "t1", &link).unwrap();
+            assert!(store_totp(&conn, &dek, "missing", &link).is_err(), "an unknown login is refused");
+        }
+
+        let conn = vault::init_db(&path).unwrap();
+        agent::refs::init_alias_table(&conn).unwrap();
+        let code = credentials::totp_code(&conn, &dek, "t1").unwrap().unwrap();
+        assert_eq!((code.code.len(), code.period), (8, 60), "settings came back after reopening");
+        assert!((1..=60).contains(&code.remaining));
+        let (_, value) = agent::refs::resolve(&conn, &dek, "encra://Example#totp", None).unwrap();
+        assert_eq!(value.len(), 8, "agents get the same kind of code");
+
+        // Default settings are stored as the bare key, the shape older vaults
+        // and backups already hold.
+        store_totp(&conn, &dek, "t1", &totp::Config::parse("jbsw y3dp ehpk 3pxp").unwrap()).unwrap();
+        let stored: String = conn.query_row("SELECT totp_secret FROM credentials WHERE id = 't1'", [], |r| r.get(0)).unwrap();
+        assert_eq!(fields::open_to_string(&dek, "credentials", "t1", "totp_secret", &stored).unwrap(), "JBSWY3DPEHPK3PXP");
+        assert_eq!(credentials::totp_code(&conn, &dek, "t1").unwrap().unwrap().period, 30);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

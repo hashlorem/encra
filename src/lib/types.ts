@@ -22,6 +22,8 @@ export interface CredentialDetail extends CredentialSummary {
 export interface TotpCode {
   code: string;
   remaining: number;
+  /** Seconds each code lasts, usually 30. */
+  period: number;
 }
 
 export interface CredentialInput {

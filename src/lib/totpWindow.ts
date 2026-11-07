@@ -8,9 +8,8 @@ import { useSyncExternalStore } from "react";
  * in the list.
  */
 
-const WINDOW_SECONDS = 30;
-
-let remaining = WINDOW_SECONDS;
+let windowSeconds = 30;
+let remaining = windowSeconds;
 let timer: ReturnType<typeof setInterval> | null = null;
 let rolloverHandler: (() => void) | null = null;
 let subscriberCount = 0;
@@ -22,7 +21,7 @@ function notify() {
 
 function tick() {
   if (remaining <= 1) {
-    remaining = WINDOW_SECONDS;
+    remaining = windowSeconds;
     // A new window started, so any code already rendered is now stale.
     rolloverHandler?.();
   } else {
@@ -32,8 +31,9 @@ function tick() {
 }
 
 /** Start (or restart) the countdown at the server-reported remaining seconds. */
-export function startTotpWindow(seconds: number) {
-  remaining = seconds > 0 ? seconds : WINDOW_SECONDS;
+export function startTotpWindow(seconds: number, period: number) {
+  windowSeconds = period > 0 ? period : 30;
+  remaining = seconds > 0 ? seconds : windowSeconds;
   if (timer === null) timer = setInterval(tick, 1000);
   notify();
 }

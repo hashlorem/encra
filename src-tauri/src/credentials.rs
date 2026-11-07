@@ -39,6 +39,8 @@ pub struct CredentialDetail {
 pub struct TotpCode {
     pub code: String,
     pub remaining: u64,
+    /// Seconds each code lasts, usually 30.
+    pub period: u64,
 }
 
 /// A field the user can copy from a login.
@@ -156,7 +158,8 @@ pub fn totp_code(db: &Connection, key: &[u8; 32], id: &str) -> Result<Option<Tot
     if secret.is_empty() {
         return Ok(None);
     }
-    Ok(Some(TotpCode { code: totp::generate_code(&secret)?, remaining: totp::remaining_seconds() }))
+    let (code, remaining, period) = totp::current(&secret)?;
+    Ok(Some(TotpCode { code, remaining, period }))
 }
 
 /// The plaintext for a copy. Empty values are refused so a copy never

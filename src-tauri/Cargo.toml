@@ -30,8 +30,15 @@ tokio = { version = "1", features = ["full"] }
 
 # XML parsing
 quick-xml = "0.37"
-arboard = { version = "3.7.0", default-features = false }
+arboard = { version = "3.7.0", default-features = false, features = ["image-data"] }
 libc = "0.2"
+
+# Reading 2FA QR codes from a screenshot
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
+rqrr = { version = "0.11", default-features = false }
+
+[dev-dependencies]
+qrcode = { version = "0.14", default-features = false }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
