@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { save, open } from "@tauri-apps/plugin-dialog";
 import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
@@ -31,6 +31,27 @@ function Settings() {
   const [pendingImport, setPendingImport] = useState<{ contents: string } | null>(null);
 
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
+  const [hasSafetyCopy, setHasSafetyCopy] = useState(false);
+  const [confirmDeleteCopy, setConfirmDeleteCopy] = useState(false);
+  const [deletingCopy, setDeletingCopy] = useState(false);
+  const [copyMsg, setCopyMsg] = useState("");
+
+  useEffect(() => {
+    invoke<boolean>("safety_copy_exists").then(setHasSafetyCopy).catch(() => setHasSafetyCopy(false));
+  }, []);
+
+  const deleteSafetyCopy = async () => {
+    setDeletingCopy(true);
+    try {
+      await invoke("delete_safety_copy");
+      setHasSafetyCopy(false);
+    } catch (error) {
+      setCopyMsg(describeError(error, "Couldn’t delete the safety copy."));
+    } finally {
+      setDeletingCopy(false);
+      setConfirmDeleteCopy(false);
+    }
+  };
   const [showReauth, setShowReauth] = useState(false);
   const [reauthPassword, setReauthPassword] = useState("");
   const [reauthError, setReauthError] = useState("");
@@ -205,6 +226,23 @@ function Settings() {
       </header>
 
       <div className="settings stagger">
+        {hasSafetyCopy && (
+          <section aria-labelledby="safety-heading">
+            <div>
+              <h2 id="safety-heading" className="section-title">Upgrade safety copy</h2>
+            </div>
+            <div className="settings-body">
+              <p className="lead">
+                A copy from before the last upgrade is still on disk, with the older, weaker protection.
+                Delete it once everything here looks right.
+              </p>
+              <div className="actions">
+                <button className="btn-danger" onClick={() => setConfirmDeleteCopy(true)}>Delete safety copy</button>
+                {copyMsg && <span className="error" role="alert">{copyMsg}</span>}
+              </div>
+            </div>
+          </section>
+        )}
         <section aria-labelledby="recovery-heading">
           <div>
             <h2 id="recovery-heading" className="section-title">Recovery codes</h2>
@@ -352,6 +390,17 @@ function Settings() {
             </div>
           </form>
         </ModalOverlay>
+      )}
+
+      {confirmDeleteCopy && (
+        <ConfirmDialog
+          title="Delete the safety copy?"
+          message="Your vault is unaffected. Only the pre-upgrade copy goes."
+          confirmLabel="Delete"
+          busy={deletingCopy}
+          onConfirm={() => void deleteSafetyCopy()}
+          onCancel={() => setConfirmDeleteCopy(false)}
+        />
       )}
 
       {pendingImport && (

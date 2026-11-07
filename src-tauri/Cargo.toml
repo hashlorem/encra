@@ -38,3 +38,11 @@ tauri-build = { version = "2", features = [] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Argon2 at 256 MiB is painfully slow unoptimised. Optimise the hashing crates
+# even in dev builds, so dev unlocks and the test suite run the real settings.
+[profile.dev.package.argon2]
+opt-level = 3
+
+[profile.dev.package.blake2]
+opt-level = 3

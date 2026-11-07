@@ -8,7 +8,7 @@ use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use zeroize::Zeroizing;
 
-use crate::{totp, vault};
+use crate::{fields, totp};
 
 /// What the vault list shows. No password, notes or 2FA secret.
 #[derive(Debug, Serialize, PartialEq)]
@@ -61,15 +61,17 @@ pub enum CopyField {
 const NOT_FOUND: &str = "credential not found";
 const UNREADABLE: &str = "could not decrypt that field";
 
-/// Decrypt an optional display field. A blank or unreadable value shows as
-/// empty rather than failing the whole list.
-fn display_field(key: &[u8; 32], stored: String) -> String {
-    vault::decrypt_opt(key, &Some(stored)).unwrap_or_default()
+const TABLE: &str = "credentials";
+
+/// Decrypt a display field. An unreadable value shows as empty rather than
+/// failing the whole list.
+fn display_field(key: &[u8; 32], id: &str, column: &str, stored: &str) -> String {
+    fields::open_to_string(key, TABLE, id, column, stored).unwrap_or_default()
 }
 
 pub fn list_summaries(db: &Connection, key: &[u8; 32]) -> Result<Vec<CredentialSummary>, String> {
     let mut stmt = db
-        .prepare("SELECT id, service, username, totp_secret IS NOT NULL, created_at FROM credentials ORDER BY service COLLATE NOCASE")
+        .prepare("SELECT id, service, username, totp_secret IS NOT NULL, created_at FROM credentials")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -85,16 +87,19 @@ pub fn list_summaries(db: &Connection, key: &[u8; 32]) -> Result<Vec<CredentialS
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
-    Ok(rows
+    // Names are encrypted, so the database cannot sort them; sort here.
+    let mut list: Vec<CredentialSummary> = rows
         .into_iter()
         .map(|(id, service, username, has_totp, created_at)| CredentialSummary {
+            service: fields::open_to_string(key, TABLE, &id, "service", &service).unwrap_or_else(|_| "[unreadable]".into()),
+            username: display_field(key, &id, "username", &username),
             id,
-            service,
-            username: display_field(key, username),
             has_totp,
             created_at,
         })
-        .collect())
+        .collect();
+    list.sort_by_cached_key(|c| c.service.to_lowercase());
+    Ok(list)
 }
 
 pub fn detail(db: &Connection, key: &[u8; 32], id: &str) -> Result<CredentialDetail, String> {
@@ -120,11 +125,11 @@ pub fn detail(db: &Connection, key: &[u8; 32], id: &str) -> Result<CredentialDet
 
     let (id, service, username, url, notes, has_totp, created_at) = row;
     Ok(CredentialDetail {
+        service: fields::open_to_string(key, TABLE, &id, "service", &service).unwrap_or_else(|_| "[unreadable]".into()),
+        username: display_field(key, &id, "username", &username),
+        url: display_field(key, &id, "url", &url),
+        notes: display_field(key, &id, "notes", &notes),
         id,
-        service,
-        username: display_field(key, username),
-        url: display_field(key, url),
-        notes: display_field(key, notes),
         has_totp,
         created_at,
     })
@@ -143,7 +148,7 @@ fn stored_column(db: &Connection, id: &str, column: &str) -> Result<Option<Strin
 /// the password, which could then be copied and pasted somewhere.
 fn decrypt_column(db: &Connection, key: &[u8; 32], id: &str, column: &str) -> Result<Zeroizing<String>, String> {
     match stored_column(db, id, column)? {
-        Some(value) if !value.is_empty() => vault::decrypt(key, &value).map_err(|_| UNREADABLE.into()),
+        Some(value) if !value.is_empty() => fields::open(key, TABLE, id, column, &value).map_err(|_| UNREADABLE.into()),
         _ => Ok(Zeroizing::new(String::new())),
     }
 }

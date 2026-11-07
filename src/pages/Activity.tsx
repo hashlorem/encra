@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { EmptyState } from "../components/EmptyState";
 import { describeError } from "../lib/errors";
 import { dayLabel, formatTime, parseStored } from "../lib/format";
-import type { ActivityEntry } from "../lib/types";
+import type { ActivityEntry, ActivityLog, ChainStatus } from "../lib/types";
 
 const ACTION_LABELS: Record<string, string> = {
   unlock: "Unlocked",
@@ -12,6 +12,8 @@ const ACTION_LABELS: Record<string, string> = {
   vault_created: "Vault created",
   credential_add: "New login",
   credential_delete: "Login deleted",
+  kdf_upgrade: "Key derivation strengthened",
+  safety_copy_deleted: "Safety copy deleted",
   backup_export: "Backup exported",
   backup_import: "Backup restored",
   recovery: "Recovery code used",
@@ -38,12 +40,15 @@ function groupByDay(entries: ActivityEntry[]): Day[] {
 
 function Activity() {
   const [entries, setEntries] = useState<ActivityEntry[]>([]);
+  const [chain, setChain] = useState<ChainStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
 
   const load = useCallback(async () => {
     try {
-      setEntries(await invoke<ActivityEntry[]>("get_activity_log"));
+      const log = await invoke<ActivityLog>("get_activity_log");
+      setEntries(log.entries);
+      setChain(log.chain);
       setError("");
     } catch (err) {
       setError(describeError(err, "Could not read the activity log."));
@@ -79,6 +84,19 @@ function Activity() {
         </div>
         <button className="btn-outline" onClick={() => void load()}>Refresh</button>
       </header>
+
+      {chain && (
+        <p key={chain.intact ? "intact" : "broken"} className="summary fade">
+          {chain.intact ? (
+            <>
+              Chain intact across {chain.sealed} {chain.sealed === 1 ? "entry" : "entries"}.
+              {chain.pending > 0 && ` ${chain.pending} waiting to be sealed.`}
+            </>
+          ) : (
+            <span className="error">This log was altered outside Encra: {chain.problem}.</span>
+          )}
+        </p>
+      )}
 
       {error && <p className="error" role="alert">{error}</p>}
       {loading && <p className="status" role="status">Reading the log…</p>}

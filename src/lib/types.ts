@@ -101,6 +101,20 @@ export interface ActivityEntry {
   timestamp: string;
 }
 
+/** Result of checking the activity log's HMAC chain against the vault key. */
+export interface ChainStatus {
+  intact: boolean;
+  sealed: number;
+  /** Written while locked, sealed at the next unlock. */
+  pending: number;
+  problem: string | null;
+}
+
+export interface ActivityLog {
+  entries: ActivityEntry[];
+  chain: ChainStatus;
+}
+
 export interface NmapPort {
   port: number;
   protocol: string;

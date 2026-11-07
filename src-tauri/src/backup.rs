@@ -1,7 +1,7 @@
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use crate::util::uuid_v4;
-use crate::vault;
+use crate::{fields, vault};
 
 /// Payload version.
 ///
@@ -62,11 +62,17 @@ pub struct BackupKBEntry {
     pub category: String,
 }
 
-fn decrypt_field(dek: &[u8; 32], value: &str, label: &str) -> Result<String, String> {
+/// Where a stored value lives, for its binding.
+struct Place<'a> {
+    table: &'a str,
+    id: &'a str,
+}
+
+fn decrypt_field(dek: &[u8; 32], place: &Place, column: &str, value: &str, label: &str) -> Result<String, String> {
     if value.is_empty() {
         return Ok(String::new());
     }
-    vault::decrypt_to_string(dek, value).map_err(|_| {
+    fields::open_to_string(dek, place.table, place.id, column, value).map_err(|_| {
         format!(
             "failed to decrypt {label} while building the backup — the vault may be corrupted"
         )
@@ -75,13 +81,15 @@ fn decrypt_field(dek: &[u8; 32], value: &str, label: &str) -> Result<String, Str
 
 fn decrypt_optional_field(
     dek: &[u8; 32],
+    place: &Place,
+    column: &str,
     value: &Option<String>,
     label: &str,
 ) -> Result<Option<String>, String> {
     match value {
         None => Ok(None),
         Some(raw) if raw.is_empty() => Ok(Some(String::new())),
-        Some(raw) => Ok(Some(decrypt_field(dek, raw, label)?)),
+        Some(raw) => Ok(Some(decrypt_field(dek, place, column, raw, label)?)),
     }
 }
 
@@ -95,7 +103,7 @@ fn decrypt_optional_field(
 pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, String> {
     // Credentials
     let mut stmt = conn
-        .prepare("SELECT service, username, password_encrypted, url, notes, totp_secret, created_at FROM credentials ORDER BY service")
+        .prepare("SELECT id, service, username, password_encrypted, url, notes, totp_secret, created_at FROM credentials")
         .map_err(|e| e.to_string())?;
     let credentials = stmt
         .query_map([], |row| {
@@ -105,8 +113,9 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
-                row.get::<_, Option<String>>(5)?,
-                row.get::<_, String>(6)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, Option<String>>(6)?,
+                row.get::<_, String>(7)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -114,59 +123,27 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
         .map_err(|e| e.to_string())?;
 
     let mut out_credentials = Vec::with_capacity(credentials.len());
-    for (service, username, password, url, notes, totp_secret, created_at) in credentials {
+    for (id, service, username, password, url, notes, totp_secret, created_at) in credentials {
+        let at = Place { table: "credentials", id: &id };
         out_credentials.push(BackupCredential {
-            service,
-            username: decrypt_field(dek, &username, "credential username")?,
-            password: decrypt_field(dek, &password, "credential password")?,
-            url: decrypt_field(dek, &url, "credential url")?,
-            notes: decrypt_field(dek, &notes, "credential notes")?,
-            totp_secret: decrypt_optional_field(dek, &totp_secret, "credential 2FA secret")?,
+            service: decrypt_field(dek, &at, "service", &service, "credential name")?,
+            username: decrypt_field(dek, &at, "username", &username, "credential username")?,
+            password: decrypt_field(dek, &at, "password_encrypted", &password, "credential password")?,
+            url: decrypt_field(dek, &at, "url", &url, "credential url")?,
+            notes: decrypt_field(dek, &at, "notes", &notes, "credential notes")?,
+            totp_secret: decrypt_optional_field(dek, &at, "totp_secret", &totp_secret, "credential 2FA secret")?,
             created_at,
         });
     }
 
     // Projects
     let mut stmt = conn
-        .prepare("SELECT name, description, target, methodology, status FROM projects ORDER BY name")
+        .prepare("SELECT id, name, description, target, methodology, status FROM projects")
         .map_err(|e| e.to_string())?;
     let projects = stmt
         .query_map([], |row| {
             Ok((
                 row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })
-        .map_err(|e| e.to_string())?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|e| e.to_string())?;
-
-    let mut out_projects = Vec::with_capacity(projects.len());
-    for (name, description, target, methodology, status) in projects {
-        out_projects.push(BackupProject {
-            name,
-            description: decrypt_field(dek, &description, "project description")?,
-            target: decrypt_field(dek, &target, "project target")?,
-            methodology: decrypt_field(dek, &methodology, "project methodology")?,
-            status,
-        });
-    }
-
-    // Journal entries (with project name for context)
-    let mut stmt = conn
-        .prepare(
-            "SELECT p.name, j.title, j.content, j.entry_type, j.severity, j.created_at
-             FROM journal_entries j LEFT JOIN projects p ON j.project_id = p.id
-             ORDER BY j.created_at",
-        )
-        .map_err(|e| e.to_string())?;
-    let entries = stmt
-        .query_map([], |row| {
-            Ok((
-                row.get::<_, Option<String>>(0)?.unwrap_or_default(),
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
@@ -178,12 +155,52 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
         .collect::<Result<Vec<_>, _>>()
         .map_err(|e| e.to_string())?;
 
+    // Entries reference projects by id in the vault and by name in a backup.
+    let mut project_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut out_projects = Vec::with_capacity(projects.len());
+    for (id, name, description, target, methodology, status) in projects {
+        let at = Place { table: "projects", id: &id };
+        let name = decrypt_field(dek, &at, "name", &name, "project name")?;
+        project_names.insert(id.clone(), name.clone());
+        out_projects.push(BackupProject {
+            name,
+            description: decrypt_field(dek, &at, "description", &description, "project description")?,
+            target: decrypt_field(dek, &at, "target", &target, "project target")?,
+            methodology: decrypt_field(dek, &at, "methodology", &methodology, "project methodology")?,
+            status,
+        });
+    }
+
+    // Journal entries (with project name for context)
+    let mut stmt = conn
+        .prepare(
+            "SELECT j.id, j.project_id, j.title, j.content, j.entry_type, j.severity, j.created_at
+             FROM journal_entries j ORDER BY j.created_at",
+        )
+        .map_err(|e| e.to_string())?;
+    let entries = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+            ))
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|e| e.to_string())?;
+
     let mut out_entries = Vec::with_capacity(entries.len());
-    for (project_name, title, content, entry_type, severity, created_at) in entries {
+    for (id, project_id, title, content, entry_type, severity, created_at) in entries {
+        let at = Place { table: "journal_entries", id: &id };
         out_entries.push(BackupJournalEntry {
-            project_name,
-            title: decrypt_field(dek, &title, "journal title")?,
-            content: decrypt_field(dek, &content, "journal content")?,
+            project_name: project_names.get(&project_id).cloned().unwrap_or_default(),
+            title: decrypt_field(dek, &at, "title", &title, "journal title")?,
+            content: decrypt_field(dek, &at, "content", &content, "journal content")?,
             entry_type,
             severity,
             created_at,
@@ -192,7 +209,7 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
 
     // KB entries
     let mut stmt = conn
-        .prepare("SELECT title, command, description, tags, category FROM kb_entries ORDER BY title")
+        .prepare("SELECT id, title, command, description, tags, category FROM kb_entries")
         .map_err(|e| e.to_string())?;
     let kb = stmt
         .query_map([], |row| {
@@ -202,6 +219,7 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
                 row.get::<_, String>(2)?,
                 row.get::<_, String>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, String>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -209,12 +227,13 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
         .map_err(|e| e.to_string())?;
 
     let mut out_kb = Vec::with_capacity(kb.len());
-    for (title, command, description, tags, category) in kb {
+    for (id, title, command, description, tags, category) in kb {
+        let at = Place { table: "kb_entries", id: &id };
         out_kb.push(BackupKBEntry {
-            title: decrypt_field(dek, &title, "command title")?,
-            command: decrypt_field(dek, &command, "command body")?,
-            description: decrypt_field(dek, &description, "command description")?,
-            tags: decrypt_field(dek, &tags, "command tags")?,
+            title: decrypt_field(dek, &at, "title", &title, "command title")?,
+            command: decrypt_field(dek, &at, "command", &command, "command body")?,
+            description: decrypt_field(dek, &at, "description", &description, "command description")?,
+            tags: decrypt_field(dek, &at, "tags", &tags, "command tags")?,
             category,
         });
     }
@@ -228,12 +247,13 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
     })
 }
 
-/// Confirm a field is already ciphertext for this vault, for legacy payloads.
-fn require_ciphertext(dek: &[u8; 32], value: &str, label: &str) -> Result<(), String> {
+/// Read a field from a 1.0 payload, which carried the source vault's own
+/// unbound ciphertext. It only works in the vault that made it.
+fn legacy_plaintext(dek: &[u8; 32], value: &str, label: &str) -> Result<String, String> {
     if value.is_empty() {
-        return Ok(());
+        return Ok(String::new());
     }
-    vault::decrypt_to_string(dek, value).map(|_| ()).map_err(|_| {
+    vault::decrypt_to_string(dek, value).map_err(|_| {
         format!(
             "{label} cannot be decrypted with this vault's key. This backup was made by a \
              different vault and cannot be restored here — re-export a backup from the \
@@ -242,71 +262,41 @@ fn require_ciphertext(dek: &[u8; 32], value: &str, label: &str) -> Result<(), St
     })
 }
 
-/// Turn a decrypted backup into the ciphertext form that `restore_all` stores,
-/// using the destination vault's key.
+/// Turn a decrypted backup into plain text throughout, ready for
+/// `restore_all` to encrypt row by row once each row has its new id.
 ///
 /// Also guarantees that every journal entry references a project that exists in
 /// the payload, so the insert cannot violate the foreign key constraint.
 pub fn prepare_for_import(mut backup: VaultBackup, dek: &[u8; 32]) -> Result<VaultBackup, String> {
-    let encrypt = |value: &str| vault::encrypt(dek, value);
-
     match backup.version.as_str() {
-        BACKUP_VERSION => {
-            for cred in &mut backup.credentials {
-                cred.username = encrypt(&cred.username)?;
-                cred.password = encrypt(&cred.password)?;
-                cred.url = encrypt(&cred.url)?;
-                cred.notes = encrypt(&cred.notes)?;
-                cred.totp_secret = match &cred.totp_secret {
-                    None => None,
-                    Some(secret) => Some(encrypt(secret)?),
-                };
-            }
-            for proj in &mut backup.projects {
-                proj.description = encrypt(&proj.description)?;
-                proj.target = encrypt(&proj.target)?;
-                proj.methodology = encrypt(&proj.methodology)?;
-            }
-            for entry in &mut backup.journal_entries {
-                entry.title = encrypt(&entry.title)?;
-                entry.content = encrypt(&entry.content)?;
-            }
-            for entry in &mut backup.kb_entries {
-                entry.title = encrypt(&entry.title)?;
-                entry.command = encrypt(&entry.command)?;
-                entry.description = encrypt(&entry.description)?;
-                entry.tags = encrypt(&entry.tags)?;
-            }
-        }
+        BACKUP_VERSION => {} // already plain text inside the encrypted envelope
         LEGACY_BACKUP_VERSION => {
             // 1.0 exported the password in the clear and left every other field
-            // as the source vault's ciphertext. Re-encrypt the password, and
-            // verify the rest really is readable with this key rather than
-            // writing unreadable bytes back into the vault.
+            // as the source vault's ciphertext.
             for cred in &mut backup.credentials {
-                cred.password = encrypt(&cred.password)?;
-                require_ciphertext(dek, &cred.username, "credential username")?;
-                require_ciphertext(dek, &cred.url, "credential url")?;
-                require_ciphertext(dek, &cred.notes, "credential notes")?;
+                cred.username = legacy_plaintext(dek, &cred.username, "credential username")?;
+                cred.url = legacy_plaintext(dek, &cred.url, "credential url")?;
+                cred.notes = legacy_plaintext(dek, &cred.notes, "credential notes")?;
                 if let Some(secret) = &cred.totp_secret {
-                    require_ciphertext(dek, secret, "credential 2FA secret")?;
+                    cred.totp_secret = Some(legacy_plaintext(dek, secret, "credential 2FA secret")?);
                 }
             }
-            for proj in &backup.projects {
-                require_ciphertext(dek, &proj.description, "project description")?;
-                require_ciphertext(dek, &proj.target, "project target")?;
-                require_ciphertext(dek, &proj.methodology, "project methodology")?;
+            for proj in &mut backup.projects {
+                proj.description = legacy_plaintext(dek, &proj.description, "project description")?;
+                proj.target = legacy_plaintext(dek, &proj.target, "project target")?;
+                proj.methodology = legacy_plaintext(dek, &proj.methodology, "project methodology")?;
             }
-            for entry in &backup.journal_entries {
-                require_ciphertext(dek, &entry.title, "journal title")?;
-                require_ciphertext(dek, &entry.content, "journal content")?;
+            for entry in &mut backup.journal_entries {
+                entry.title = legacy_plaintext(dek, &entry.title, "journal title")?;
+                entry.content = legacy_plaintext(dek, &entry.content, "journal content")?;
             }
-            for entry in &backup.kb_entries {
-                require_ciphertext(dek, &entry.title, "command title")?;
-                require_ciphertext(dek, &entry.command, "command body")?;
-                require_ciphertext(dek, &entry.description, "command description")?;
-                require_ciphertext(dek, &entry.tags, "command tags")?;
+            for entry in &mut backup.kb_entries {
+                entry.title = legacy_plaintext(dek, &entry.title, "command title")?;
+                entry.command = legacy_plaintext(dek, &entry.command, "command body")?;
+                entry.description = legacy_plaintext(dek, &entry.description, "command description")?;
+                entry.tags = legacy_plaintext(dek, &entry.tags, "command tags")?;
             }
+            backup.version = BACKUP_VERSION.into();
         }
         other => {
             return Err(format!(
@@ -315,7 +305,7 @@ pub fn prepare_for_import(mut backup: VaultBackup, dek: &[u8; 32]) -> Result<Vau
         }
     }
 
-    ensure_projects_exist(&mut backup, dek)?;
+    ensure_projects_exist(&mut backup);
     Ok(backup)
 }
 
@@ -324,16 +314,7 @@ pub fn prepare_for_import(mut backup: VaultBackup, dek: &[u8; 32]) -> Result<Vau
 /// The payload only references projects by name, so an entry whose project was
 /// deleted at the source would otherwise be inserted with a dangling id and
 /// abort the whole import on the foreign key constraint.
-fn ensure_projects_exist(backup: &mut VaultBackup, dek: &[u8; 32]) -> Result<(), String> {
-    let legacy = backup.version == LEGACY_BACKUP_VERSION;
-    let blank = |dek: &[u8; 32]| -> Result<String, String> {
-        if legacy {
-            vault::encrypt(dek, "")
-        } else {
-            Ok(String::new())
-        }
-    };
-
+fn ensure_projects_exist(backup: &mut VaultBackup) {
     let mut known: Vec<String> = backup.projects.iter().map(|p| p.name.clone()).collect();
     let referenced: Vec<String> = backup
         .journal_entries
@@ -348,36 +329,41 @@ fn ensure_projects_exist(backup: &mut VaultBackup, dek: &[u8; 32]) -> Result<(),
         known.push(name.clone());
         backup.projects.push(BackupProject {
             name,
-            description: blank(dek)?,
-            target: blank(dek)?,
-            methodology: blank(dek)?,
+            description: String::new(),
+            target: String::new(),
+            methodology: String::new(),
             status: "planning".into(),
         });
     }
-
-    Ok(())
 }
 
-/// Insert a prepared (ciphertext) backup into the vault atomically.
+/// Insert a prepared (plain text) backup into the vault atomically, sealing
+/// every value to its new row as it goes.
 ///
 /// Every row either lands or none does: a failure part-way through used to leave
 /// a half-imported vault behind.
-pub fn restore_all(conn: &Connection, backup: &VaultBackup) -> Result<(), String> {
+pub fn restore_all(conn: &Connection, dek: &[u8; 32], backup: &VaultBackup) -> Result<(), String> {
     conn.execute("BEGIN IMMEDIATE", []).map_err(|e| e.to_string())?;
 
     let restore = || -> Result<(), String> {
         for cred in &backup.credentials {
+            let id = uuid_v4();
+            let seal = |column: &str, value: &str| fields::seal(dek, "credentials", &id, column, value);
+            let totp = match &cred.totp_secret {
+                None => None,
+                Some(secret) => Some(seal("totp_secret", secret)?),
+            };
             conn.execute(
                 "INSERT INTO credentials (id, service, username, password_encrypted, url, notes, totp_secret, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 rusqlite::params![
-                    uuid_v4(),
-                    cred.service,
-                    cred.username,
-                    cred.password,
-                    cred.url,
-                    cred.notes,
-                    cred.totp_secret,
+                    id,
+                    seal("service", &cred.service)?,
+                    seal("username", &cred.username)?,
+                    seal("password_encrypted", &cred.password)?,
+                    seal("url", &cred.url)?,
+                    seal("notes", &cred.notes)?,
+                    totp,
                     cred.created_at,
                 ],
             )
@@ -389,10 +375,18 @@ pub fn restore_all(conn: &Connection, backup: &VaultBackup) -> Result<(), String
         for proj in &backup.projects {
             let pid = uuid_v4();
             project_map.insert(proj.name.clone(), pid.clone());
+            let seal = |column: &str, value: &str| fields::seal(dek, "projects", &pid, column, value);
             conn.execute(
                 "INSERT INTO projects (id, name, description, target, methodology, status)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![pid, proj.name, proj.description, proj.target, proj.methodology, proj.status],
+                rusqlite::params![
+                    pid,
+                    seal("name", &proj.name)?,
+                    seal("description", &proj.description)?,
+                    seal("target", &proj.target)?,
+                    seal("methodology", &proj.methodology)?,
+                    proj.status,
+                ],
             )
             .map_err(|e| e.to_string())?;
         }
@@ -404,19 +398,37 @@ pub fn restore_all(conn: &Connection, backup: &VaultBackup) -> Result<(), String
                     entry.title, entry.project_name
                 )
             })?;
+            let id = uuid_v4();
             conn.execute(
                 "INSERT INTO journal_entries (id, project_id, title, content, entry_type, severity, created_at)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                rusqlite::params![uuid_v4(), pid, entry.title, entry.content, entry.entry_type, entry.severity, entry.created_at],
+                rusqlite::params![
+                    id,
+                    pid,
+                    fields::seal(dek, "journal_entries", &id, "title", &entry.title)?,
+                    fields::seal(dek, "journal_entries", &id, "content", &entry.content)?,
+                    entry.entry_type,
+                    entry.severity,
+                    entry.created_at,
+                ],
             )
             .map_err(|e| e.to_string())?;
         }
 
         for entry in &backup.kb_entries {
+            let id = uuid_v4();
+            let seal = |column: &str, value: &str| fields::seal(dek, "kb_entries", &id, column, value);
             conn.execute(
                 "INSERT INTO kb_entries (id, title, command, description, tags, category)
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-                rusqlite::params![uuid_v4(), entry.title, entry.command, entry.description, entry.tags, entry.category],
+                rusqlite::params![
+                    id,
+                    seal("title", &entry.title)?,
+                    seal("command", &entry.command)?,
+                    seal("description", &entry.description)?,
+                    seal("tags", &entry.tags)?,
+                    entry.category,
+                ],
             )
             .map_err(|e| e.to_string())?;
         }

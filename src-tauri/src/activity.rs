@@ -39,6 +39,9 @@ pub fn init_activity_table(conn: &Connection) -> Result<(), String> {
     // Migration: add columns if upgrading from old recovery_codes schema
     conn.execute("ALTER TABLE recovery_codes ADD COLUMN salt TEXT NOT NULL DEFAULT ''", []).ok();
     conn.execute("ALTER TABLE recovery_codes ADD COLUMN wrapped_dek TEXT NOT NULL DEFAULT ''", []).ok();
+    // Format 3: position in the chain, and the entry's HMAC once sealed.
+    conn.execute("ALTER TABLE activity_log ADD COLUMN seq INTEGER", []).ok();
+    conn.execute("ALTER TABLE activity_log ADD COLUMN mac TEXT", []).ok();
 
     Ok(())
 }
@@ -48,10 +51,196 @@ pub fn log_action(conn: &Connection, action: &str, detail: &str) {
     // best-effort, so a collision would silently drop an audit entry.
     let id = uuid_v4();
     conn.execute(
-        "INSERT INTO activity_log (id, action, detail) VALUES (?1, ?2, ?3)",
+        "INSERT INTO activity_log (id, action, detail, seq)
+         VALUES (?1, ?2, ?3, (SELECT COALESCE(MAX(seq), 0) + 1 FROM activity_log))",
         rusqlite::params![id, action, detail],
     )
     .ok();
+}
+
+// ===== The HMAC chain (vault format 3) =====
+//
+// Each entry is sealed with HMAC-SHA256 over the previous entry's MAC, its own
+// position and contents, keyed from the data key. Without the master password
+// nobody can recompute the chain, so editing, inserting, reordering or
+// deleting a sealed entry shows up when it is verified. A MAC over the newest
+// sealed entry ("the head") is kept in vault_config, so cutting entries off
+// the end shows up too.
+//
+// Limit: entries written while the vault is locked (failed unlocks) cannot be
+// sealed until the next unlock. Until then someone with the file could delete
+// them or add fake ones; they cannot touch anything already sealed.
+
+type HmacSha256 = hmac::Hmac<sha2::Sha256>;
+
+fn log_key(dek: &[u8; 32]) -> zeroize::Zeroizing<[u8; 32]> {
+    use hmac::Mac;
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(dek).expect("HMAC accepts any key length");
+    mac.update(b"encra:activity-log:v1");
+    zeroize::Zeroizing::new(mac.finalize().into_bytes().into())
+}
+
+fn hmac_hex(key: &[u8; 32], message: &str) -> String {
+    use hmac::Mac;
+    let mut mac = <HmacSha256 as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
+    mac.update(message.as_bytes());
+    mac.finalize().into_bytes().iter().map(|b| format!("{b:02x}")).collect()
+}
+
+fn entry_mac(key: &[u8; 32], prev: &str, seq: i64, action: &str, timestamp: &str, detail: &str) -> String {
+    // Detail goes last: it is the only part that could contain a newline.
+    hmac_hex(key, &format!("{prev}\n{seq}\n{action}\n{timestamp}\n{detail}"))
+}
+
+fn head_mac(key: &[u8; 32], seq: i64, mac: &str) -> String {
+    hmac_hex(key, &format!("head\n{seq}\n{mac}"))
+}
+
+/// Number entries 1..n in the order they were written. Run once, inside the
+/// format-3 migration, before anything is sealed.
+pub fn renumber(conn: &Connection) -> Result<(), String> {
+    let mut stmt = conn.prepare("SELECT rowid FROM activity_log ORDER BY rowid").map_err(|e| e.to_string())?;
+    let rowids: Vec<i64> = stmt
+        .query_map([], |row| row.get(0))
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    for (index, rowid) in rowids.iter().enumerate() {
+        conn.execute("UPDATE activity_log SET seq = ?1, mac = NULL WHERE rowid = ?2", rusqlite::params![index as i64 + 1, rowid])
+            .map_err(|e| e.to_string())?;
+    }
+    conn.execute("DELETE FROM vault_config WHERE key = 'log_head'", []).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+struct ChainRow {
+    seq: Option<i64>,
+    action: String,
+    detail: String,
+    timestamp: String,
+    mac: Option<String>,
+}
+
+fn chain_rows(conn: &Connection) -> Result<Vec<ChainRow>, String> {
+    let mut stmt = conn
+        .prepare("SELECT seq, action, COALESCE(detail, ''), timestamp, mac FROM activity_log ORDER BY seq, rowid")
+        .map_err(|e| e.to_string())?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok(ChainRow { seq: row.get(0)?, action: row.get(1)?, detail: row.get(2)?, timestamp: row.get(3)?, mac: row.get(4)? })
+        })
+        .map_err(|e| e.to_string())?
+        .collect::<Result<_, _>>()
+        .map_err(|e| e.to_string())?;
+    Ok(rows)
+}
+
+/// Seal every pending entry, in order, and move the head. Returns how many
+/// were sealed.
+///
+/// Refuses on a broken chain. Sealing extends whatever is there and moves the
+/// head, so sealing on top of, say, a cut-off tail would make the cut look
+/// legitimate. Left pending, the damage stays visible.
+pub fn seal_pending(conn: &Connection, dek: &[u8; 32]) -> Result<usize, String> {
+    let status = verify_chain(conn, dek)?;
+    if !status.intact {
+        return Err(format!("not sealing a broken chain: {}", status.problem.unwrap_or_default()));
+    }
+    if status.pending == 0 {
+        return Ok(0);
+    }
+    let key = log_key(dek);
+    let rows = chain_rows(conn)?;
+    let mut prev = String::new();
+    let mut sealed = 0;
+    let mut head: Option<(i64, String)> = None;
+    for row in rows {
+        let Some(seq) = row.seq else { continue };
+        match row.mac {
+            Some(mac) => prev = mac,
+            None => {
+                let mac = entry_mac(&key, &prev, seq, &row.action, &row.timestamp, &row.detail);
+                conn.execute("UPDATE activity_log SET mac = ?1 WHERE seq = ?2 AND mac IS NULL", rusqlite::params![mac, seq])
+                    .map_err(|e| e.to_string())?;
+                prev = mac.clone();
+                head = Some((seq, mac));
+                sealed += 1;
+            }
+        }
+    }
+    if let Some((seq, mac)) = head {
+        conn.execute(
+            "INSERT OR REPLACE INTO vault_config (key, value) VALUES ('log_head', ?1)",
+            [format!("{seq}:{}", head_mac(&key, seq, &mac))],
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    Ok(sealed)
+}
+
+#[derive(Debug, Serialize, PartialEq)]
+pub struct ChainStatus {
+    pub intact: bool,
+    pub sealed: usize,
+    /// Written while locked; sealed at the next unlock.
+    pub pending: usize,
+    /// What is wrong, in plain words, when `intact` is false.
+    pub problem: Option<String>,
+}
+
+/// Check the whole chain against the data key.
+pub fn verify_chain(conn: &Connection, dek: &[u8; 32]) -> Result<ChainStatus, String> {
+    let key = log_key(dek);
+    let rows = chain_rows(conn)?;
+    let mut status = ChainStatus { intact: true, sealed: 0, pending: 0, problem: None };
+    let fail = |status: &mut ChainStatus, problem: String| {
+        if status.intact {
+            status.intact = false;
+            status.problem = Some(problem);
+        }
+    };
+
+    let mut prev = String::new();
+    let mut last_sealed: Option<(i64, String)> = None;
+    for (index, row) in rows.iter().enumerate() {
+        let expected = index as i64 + 1;
+        let Some(seq) = row.seq else {
+            fail(&mut status, "an entry without a position was added".into());
+            continue;
+        };
+        if seq != expected {
+            fail(&mut status, format!("entry {expected} is missing or out of order"));
+        }
+        match &row.mac {
+            Some(mac) => {
+                if status.pending > 0 {
+                    fail(&mut status, format!("entry {seq} was sealed after unsealed entries"));
+                }
+                if entry_mac(&key, &prev, seq, &row.action, &row.timestamp, &row.detail) != *mac {
+                    fail(&mut status, format!("entry {seq} was changed"));
+                }
+                prev = mac.clone();
+                last_sealed = Some((seq, mac.clone()));
+                status.sealed += 1;
+            }
+            None => status.pending += 1,
+        }
+    }
+
+    let head: Option<String> = conn
+        .query_row("SELECT value FROM vault_config WHERE key = 'log_head'", [], |row| row.get(0))
+        .ok();
+    match (last_sealed, head) {
+        (None, None) => {}
+        (Some((seq, mac)), Some(stored)) => {
+            if stored != format!("{seq}:{}", head_mac(&key, seq, &mac)) {
+                fail(&mut status, "the newest sealed entries were removed".into());
+            }
+        }
+        (Some(_), None) => fail(&mut status, "the record of the newest sealed entry is missing".into()),
+        (None, Some(_)) => fail(&mut status, "sealed entries were removed".into()),
+    }
+    Ok(status)
 }
 
 /// Generate recovery codes that can recover the DEK from locked state.
@@ -237,9 +426,11 @@ fn apply_recovery_reset(
     os_rng().fill_bytes(&mut new_salt);
     let salt_b64 = base64::engine::general_purpose::STANDARD.encode(new_salt);
 
-    let wrapping_key = vault::derive_key(new_password, &new_salt)?;
-    let wrapped = vault::wrap_dek(dek, &wrapping_key)?;
-    let pass_hash = vault::hash_password(new_password)?;
+    let mut wrapping_key = vault::derive_key_with(new_password, &new_salt, vault::KdfParams::CURRENT)?;
+    let wrapped = vault::wrap_dek(dek, &wrapping_key);
+    wrapping_key.zeroize();
+    let wrapped = wrapped?;
+    let pass_hash = vault::hash_password_with(new_password, vault::KdfParams::CURRENT)?;
 
     conn.execute(
         "INSERT OR REPLACE INTO vault_config (key, value) VALUES ('encrypted_dek', ?1)",
@@ -252,6 +443,10 @@ fn apply_recovery_reset(
     conn.execute(
         "INSERT OR REPLACE INTO vault_config (key, value) VALUES ('kdf_salt', ?1)",
         rusqlite::params![salt_b64],
+    ).map_err(|e| e.to_string())?;
+    conn.execute(
+        "INSERT OR REPLACE INTO vault_config (key, value) VALUES ('kdf_params', ?1)",
+        rusqlite::params![vault::KdfParams::CURRENT.encode()],
     ).map_err(|e| e.to_string())?;
     conn.execute(
         "DELETE FROM recovery_codes WHERE id = ?1",
