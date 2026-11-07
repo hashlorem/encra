@@ -140,15 +140,15 @@ function Dashboard({ onLock }: DashboardProps) {
       setLockBinding(readPreference(PREFERENCE_KEYS.lockKeybind) || DEFAULT_LOCK_BINDING);
       setAutoLockBlur(readBooleanPreference(PREFERENCE_KEYS.autoLockBlur, false));
     };
-    window.addEventListener("cobrypt:settings-changed", handler);
-    return () => window.removeEventListener("cobrypt:settings-changed", handler);
+    window.addEventListener("encra:settings-changed", handler);
+    return () => window.removeEventListener("encra:settings-changed", handler);
   }, []);
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
       if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
         event.preventDefault();
-        window.dispatchEvent(new CustomEvent("cobrypt:search-focus"));
+        window.dispatchEvent(new CustomEvent("encra:search-focus"));
         return;
       }
 

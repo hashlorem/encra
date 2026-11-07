@@ -57,21 +57,21 @@ function Settings() {
   const updateLockKeybind = (value: string) => {
     setLockKeybind(value);
     writePreference(PREFERENCE_KEYS.lockKeybind, value);
-    window.dispatchEvent(new CustomEvent("cobrypt:settings-changed"));
+    window.dispatchEvent(new CustomEvent("encra:settings-changed"));
   };
 
   const toggleAutoLock = () => {
     const next = !autoLockOnBlur;
     setAutoLockOnBlur(next);
     writeBooleanPreference(PREFERENCE_KEYS.autoLockBlur, next);
-    window.dispatchEvent(new CustomEvent("cobrypt:settings-changed"));
+    window.dispatchEvent(new CustomEvent("encra:settings-changed"));
   };
 
   const toggleSound = () => {
     const next = !soundEnabled;
     setSoundEnabled(next);
     writeBooleanPreference(PREFERENCE_KEYS.sound, next);
-    window.dispatchEvent(new CustomEvent("cobrypt:settings-changed"));
+    window.dispatchEvent(new CustomEvent("encra:settings-changed"));
   };
 
   const loadActivity = useCallback(async () => {
@@ -99,8 +99,8 @@ function Settings() {
     try {
       const encrypted = await invoke<string>("export_backup", { backupPassword });
       const filePath = await save({
-        defaultPath: `cobrypt-backup-${new Date().toISOString().slice(0, 10)}.cobrypt`,
-        filters: [{ name: "Cobrypt Backup", extensions: ["cobrypt"] }],
+        defaultPath: `encra-backup-${new Date().toISOString().slice(0, 10)}.encra`,
+        filters: [{ name: "Encra Backup", extensions: ["encra"] }],
       });
       if (filePath) {
         await writeTextFile(filePath, encrypted);
@@ -125,7 +125,7 @@ function Settings() {
     setImportMsg("");
     try {
       const filePath = await open({
-        filters: [{ name: "Cobrypt Backup", extensions: ["cobrypt", "kpt"] }],
+        filters: [{ name: "Encra Backup", extensions: ["encra", "cobrypt", "kpt"] }],
         multiple: false,
       });
       if (!filePath) return;
@@ -276,7 +276,7 @@ function Settings() {
             </div>
             {activityLoading && <p className="inline-message" role="status">Loading…</p>}
             {!activityLoading && activityLog.length === 0 && (
-              <EmptyState prompt="$ cat /var/log/cobrypt" output="no activity recorded" />
+              <EmptyState prompt="$ cat /var/log/encra" output="no activity recorded" />
             )}
             {activityLog.map((entry) => (
               <div key={entry.id} className="activity-row">
@@ -349,7 +349,7 @@ function Settings() {
         <div className="settings-section">
           <div className="settings-section-heading">
             <span className="settings-icon"><Icon name="upload" size={19} /></span>
-            <div><h3>Restore backup</h3><p>Import an encrypted Cobrypt or legacy KeyRPT backup.</p></div>
+            <div><h3>Restore backup</h3><p>Import an Encra backup, or one made by Cobrypt or KeyRPT.</p></div>
           </div>
           <div className="settings-input-row">
             <label className="sr-only" htmlFor="import-password">Backup password</label>
@@ -460,7 +460,7 @@ function Settings() {
       </div>
 
       <div className="settings-about">
-        <span>cobrypt {APP_VERSION}</span>
+        <span>encra {APP_VERSION}</span>
         <span className="status-dot" />
         <span>Local-first encrypted security workspace</span>
       </div>

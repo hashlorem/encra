@@ -22,7 +22,7 @@ function prefersReducedMotion() {
  * `resizable` is tied to the mode: the lock screen is a fixed panel, while the
  * workspace is a normal window. Previously the window was pinned non-resizable
  * and nothing ever restored it, so after the first unlock the user could never
- * resize Cobrypt again.
+ * resize Encra again.
  */
 export async function animateWindowMode(unlocked: boolean, animated = true) {
   if (!isTauriRuntime()) return;
@@ -63,6 +63,6 @@ export async function animateWindowMode(unlocked: boolean, animated = true) {
       await appWindow.setResizable(unlocked);
     }
   } catch (error) {
-    console.error("Unable to update the Cobrypt window geometry", error);
+    console.error("Unable to update the Encra window geometry", error);
   }
 }

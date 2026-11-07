@@ -1,8 +1,8 @@
 {
   "$schema": "https://raw.githubusercontent.com/nicedoc/tauri-docs/refs/heads/dev/src/content/docs/_schema/config.schema.json",
-  "productName": "Cobrypt",
+  "productName": "Encra",
   "version": "0.1.0",
-  "identifier": "com.cobrypt.desktop",
+  "identifier": "com.encra.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
@@ -12,7 +12,7 @@
   "app": {
     "windows": [
       {
-        "title": "Cobrypt",
+        "title": "Encra",
         "width": 700,
         "height": 720,
         "center": true,

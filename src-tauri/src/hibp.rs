@@ -24,7 +24,7 @@ pub async fn check_password(password: &str) -> Result<u32, String> {
     // Fetch matching hashes from HIBP
     let url = format!("{}{}", HIBP_API, prefix);
     let client = reqwest::Client::builder()
-        .user_agent("cobrypt/0.1.0")
+        .user_agent("encra/0.1.0")
         .timeout(Duration::from_secs(HIBP_TIMEOUT_SECS))
         .build()
         .map_err(|e| e.to_string())?;

@@ -10,6 +10,7 @@ tsconfig.tsbuildinfo
 
 # Vault backups must never be committed: they are portable copies of the vault.
 *.cobrypt
+*.encra
 *.kpt
 
 # SQLite sidecar files (WAL, shared memory, rollback journal)

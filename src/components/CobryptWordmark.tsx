@@ -20,7 +20,7 @@ export function CobryptWordmark({
     <span
       className={`cobrypt-wordmark cobrypt-wordmark-${variant}${className ? ` ${className}` : ""}`}
       role="img"
-      aria-label="Cobrypt"
+      aria-label="Encra"
     >
       <SnakeEye
         ref={eyeRef}
@@ -28,7 +28,7 @@ export function CobryptWordmark({
         closed={closed}
         interactive={interactive}
       />
-      <span className="cobrypt-wordmark-text" aria-hidden="true">Cobrypt</span>
+      <span className="cobrypt-wordmark-text" aria-hidden="true">Encra</span>
     </span>
   );
 }

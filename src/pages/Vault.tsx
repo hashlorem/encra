@@ -215,8 +215,8 @@ function Vault() {
   // Cmd/Ctrl+K focuses search.
   useEffect(() => {
     const handler = () => document.querySelector<HTMLInputElement>(".search-input")?.focus();
-    window.addEventListener("cobrypt:search-focus", handler);
-    return () => window.removeEventListener("cobrypt:search-focus", handler);
+    window.addEventListener("encra:search-focus", handler);
+    return () => window.removeEventListener("encra:search-focus", handler);
   }, []);
 
   const filtered = useMemo(() => {

@@ -167,7 +167,7 @@ function LockScreen({ onUnlock }: LockScreenProps) {
       </main>
 
       <p className="lock-local-note">Decrypt this workspace locally. No password or vault data will be transmitted.</p>
-      <p className="lock-version-note">COBRYPT {APP_VERSION}</p>
+      <p className="lock-version-note">ENCRA {APP_VERSION}</p>
     </div>
   );
 }

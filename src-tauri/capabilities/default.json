@@ -1,6 +1,6 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Cobrypt",
+  "description": "Default capabilities for Encra",
   "windows": ["main"],
   "permissions": [
     "core:default",

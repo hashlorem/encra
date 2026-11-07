@@ -1,16 +1,18 @@
 export const PREFERENCE_KEYS = {
-  theme: "cobrypt-theme",
-  lockKeybind: "cobrypt-lock-keybind",
-  autoLockBlur: "cobrypt-autolock-blur",
-  sound: "cobrypt-sound",
+  theme: "encra-theme",
+  lockKeybind: "encra-lock-keybind",
+  autoLockBlur: "encra-autolock-blur",
+  sound: "encra-sound",
 } as const;
 
 export type PreferenceKey = (typeof PREFERENCE_KEYS)[keyof typeof PREFERENCE_KEYS];
 
-const LEGACY_KEYS: Partial<Record<PreferenceKey, string>> = {
-  [PREFERENCE_KEYS.theme]: "keyrpt-theme",
-  [PREFERENCE_KEYS.lockKeybind]: "keyrpt-lock-keybind",
-  [PREFERENCE_KEYS.autoLockBlur]: "keyrpt-autolock-blur",
+/** Keys used by earlier product names, newest first. */
+const LEGACY_KEYS: Partial<Record<PreferenceKey, string[]>> = {
+  [PREFERENCE_KEYS.theme]: ["cobrypt-theme", "keyrpt-theme"],
+  [PREFERENCE_KEYS.lockKeybind]: ["cobrypt-lock-keybind", "keyrpt-lock-keybind"],
+  [PREFERENCE_KEYS.autoLockBlur]: ["cobrypt-autolock-blur", "keyrpt-autolock-blur"],
+  [PREFERENCE_KEYS.sound]: ["cobrypt-sound"],
 };
 
 /**
@@ -27,8 +29,8 @@ function storage(): Storage | null {
 }
 
 /**
- * Read a preference, migrating a legacy `keyrpt-*` value on first use. The
- * legacy entry is removed once copied so stale data does not linger.
+ * Read a preference, migrating a `cobrypt-*` or `keyrpt-*` value on first use.
+ * Legacy entries are removed once copied so stale data does not linger.
  */
 export function readPreference(key: PreferenceKey): string | null {
   const store = storage();
@@ -38,14 +40,11 @@ export function readPreference(key: PreferenceKey): string | null {
     const current = store.getItem(key);
     if (current !== null) return current;
 
-    const legacyKey = LEGACY_KEYS[key];
-    if (!legacyKey) return null;
-
-    const legacyValue = store.getItem(legacyKey);
-    if (legacyValue !== null) {
-      store.setItem(key, legacyValue);
-      store.removeItem(legacyKey);
-    }
+    const legacyKeys = LEGACY_KEYS[key] ?? [];
+    const legacyValue =
+      legacyKeys.map((legacyKey) => store.getItem(legacyKey)).find((value) => value !== null) ?? null;
+    if (legacyValue !== null) store.setItem(key, legacyValue);
+    legacyKeys.forEach((legacyKey) => store.removeItem(legacyKey));
     return legacyValue;
   } catch {
     return null;
