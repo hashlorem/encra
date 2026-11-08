@@ -34,8 +34,10 @@ quick-xml = "0.37"
 arboard = { version = "3.7.0", default-features = false, features = ["image-data"] }
 libc = "0.2"
 
-# Password manager exports
+# Password manager exports, and indicator lists
 csv = "1"
+# Finding indicators (IPs, domains, hashes, CVEs) in case notes
+regex = "1"
 
 # Reading 2FA QR codes from a screenshot
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

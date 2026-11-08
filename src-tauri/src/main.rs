@@ -17,6 +17,8 @@ mod qr;
 mod evidence;
 mod import;
 mod checkup;
+mod palette;
+mod indicators;
 mod util;
 mod paths;
 mod db;
@@ -151,12 +153,13 @@ fn main() {
             logins::add_credential, logins::update_credential, logins::delete_credential,
             logins::setup_totp, logins::setup_totp_from_clipboard, logins::setup_totp_from_image, logins::remove_totp,
             logins::check_hibp,
-            checkup_cmd::vault_checkup, checkup_cmd::check_all_breaches,
+            checkup_cmd::vault_checkup, checkup_cmd::check_all_breaches, logins::palette_search,
             lifecycle::vault_status, lifecycle::create_vault, lifecycle::unlock_vault, lifecycle::lock_vault,
             lifecycle::safety_copy_exists, lifecycle::delete_safety_copy,
             agent_cmd::agent_status, agent_cmd::set_agent_access, agent_cmd::agent_pending, agent_cmd::agent_decide,
             cases::create_project, cases::get_projects, cases::delete_project,
             cases::add_entry, cases::add_entries, cases::get_entries, cases::delete_entry,
+            cases::case_indicators, cases::export_indicators, cases::case_timeline,
             evidence_cmd::list_evidence, evidence_cmd::add_evidence, evidence_cmd::add_dropped_evidence,
             evidence_cmd::verify_evidence, evidence_cmd::export_evidence, evidence_cmd::evidence_custody,
             evidence_cmd::add_evidence_note, evidence_cmd::delete_evidence,

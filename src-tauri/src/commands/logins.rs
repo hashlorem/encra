@@ -223,3 +223,12 @@ pub(crate) async fn check_hibp(state: tauri::State<'_, AppState>, password: Stri
     let _key = require_unlocked(&state)?;
     hibp::check_password(&password).await
 }
+
+/// The ⌘K palette's results for `query`: names and ids only.
+#[tauri::command]
+pub(crate) fn palette_search(state: tauri::State<AppState>, query: String) -> Result<Vec<crate::palette::Hit>, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    crate::palette::search(&db, &key, &query)
+}
+

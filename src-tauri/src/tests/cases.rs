@@ -66,3 +66,58 @@ fn test_bulk_entry_insert_is_atomic_on_failure() {
 
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn test_case_indicators_and_timeline_draw_on_notes_and_evidence() {
+    use crate::commands::cases::{case_sources, timeline};
+    use crate::indicators::{self, Kind};
+
+    let dir = migration_test_dir("case-views");
+    let path = dir.join("vault.db");
+    let dek = create_test_vault(&path, "a-long-master-password");
+    let conn = Connection::open(&path).unwrap();
+    bring_up_to_date(&conn, "a-long-master-password", &dek).unwrap();
+    crate::evidence::init_tables(&conn).unwrap();
+    let seal = |table: &str, id: &str, column: &str, value: &str| crate::fields::seal(&dek, table, id, column, value).unwrap();
+    conn.execute(
+        "INSERT INTO projects (id, name, description, created_at) VALUES ('case', ?1, ?2, '2026-11-03 09:12:40')",
+        [seal("projects", "case", "name", "Phishing, finance mailbox"), seal("projects", "case", "description", "Wire request from a lookalike")],
+    )
+    .unwrap();
+    for (id, title, content, at) in [
+        ("e2", "Gateway log", "One click from 10.0.4.12 to hxxps://invoices-examp1e[.]com/pay", "2026-11-03 10:02:11"),
+        ("e1", "Header analysis", "Sent from 203.0.113.45 via invoices-examp1e.com, CVE-2023-23397 noted", "2026-11-03 09:31:05"),
+    ] {
+        conn.execute(
+            "INSERT INTO journal_entries (id, project_id, title, content, entry_type, severity, created_at) VALUES (?1, 'case', ?2, ?3, 'finding', 'high', ?4)",
+            [id, &seal("journal_entries", id, "title", title), &seal("journal_entries", id, "content", content), at],
+        )
+        .unwrap();
+    }
+    let evidence_dir = dir.join("evidence");
+    let file = dir.join("invoice.pdf.html");
+    std::fs::write(&file, b"<html>fake invoice</html>").unwrap();
+    let staged = crate::evidence::stage(&evidence_dir, &file, &mut |_, _| {}).unwrap();
+    let item = crate::evidence::commit(&conn, &dek, &evidence_dir, "case", staged, "").unwrap();
+    crate::evidence::add_note(&conn, &dek, &item.id, "Sandbox reached 198.51.100.23").unwrap();
+
+    let found = indicators::extract(&case_sources(&conn, &dek, &evidence_dir, "case").unwrap());
+    let has = |kind: Kind, value: &str| found.iter().any(|i| i.kind == kind && i.value == value);
+    assert!(has(Kind::Ipv4, "203.0.113.45") && has(Kind::Ipv4, "10.0.4.12") && has(Kind::Ipv4, "198.51.100.23"), "custody notes count");
+    assert!(has(Kind::Domain, "invoices-examp1e.com") && has(Kind::Url, "https://invoices-examp1e.com/pay"));
+    assert!(has(Kind::Sha256, &item.hashes.sha256) && has(Kind::Md5, &item.hashes.md5), "evidence hashes");
+    assert!(has(Kind::Cve, "CVE-2023-23397"));
+    let domain = found.iter().find(|i| i.value == "invoices-examp1e.com").unwrap();
+    assert_eq!(domain.sources, ["Header analysis", "Gateway log"], "oldest note first");
+    assert!(!found.iter().any(|i| i.value.contains("invoice.pdf")), "the file name is not a domain");
+
+    let events = timeline(&conn, &dek, &evidence_dir, "case").unwrap();
+    let order: Vec<(&str, &str)> = events.iter().map(|e| (e.source, e.title.as_str())).collect();
+    assert_eq!(order[..3], [("case", "Phishing, finance mailbox"), ("entry", "Header analysis"), ("entry", "Gateway log")]);
+    let evidence_actions: Vec<&str> = events.iter().filter(|e| e.source == "evidence").map(|e| e.action.as_deref().unwrap()).collect();
+    assert_eq!(evidence_actions, ["added", "note"]);
+    assert!(events.windows(2).all(|w| w[0].at <= w[1].at));
+    assert!(timeline(&conn, &dek, &evidence_dir, "missing").is_err());
+    drop(conn);
+    std::fs::remove_dir_all(dir).unwrap();
+}

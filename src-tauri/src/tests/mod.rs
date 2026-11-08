@@ -12,3 +12,4 @@ mod backup;
 mod cases;
 mod checkup;
 mod import;
+mod palette;
