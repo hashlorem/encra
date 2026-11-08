@@ -527,7 +527,7 @@ pub fn discard(dir: &Path, staged: Staged) {
 pub fn commit(db: &Connection, dek: &[u8; 32], dir: &Path, project_id: &str, staged: Staged, note: &str) -> Result<Item, String> {
     let staging = staging_path(dir, &staged.id);
     let stored = stored_path(dir, &staged.id);
-    let result = crate::in_transaction(db, || {
+    let result = crate::db::in_transaction(db, || {
         let exists: bool = db.query_row("SELECT EXISTS (SELECT 1 FROM projects WHERE id = ?1)", [project_id], |r| r.get(0)).map_err(|e| e.to_string())?;
         if !exists {
             return Err("that case no longer exists".into());
@@ -626,7 +626,7 @@ pub fn open_item(db: &Connection, dek: &[u8; 32], item_id: &str) -> Result<(Item
 /// Record a check in the custody chain.
 pub fn record_check(db: &Connection, dek: &[u8; 32], item: &Item, check: &Check) -> Result<(), String> {
     let action = if check.ok { "verified" } else { "verify_failed" };
-    crate::in_transaction(db, || append(db, dek, &item.id, &item.hashes.sha256, action, &check.detail))
+    crate::db::in_transaction(db, || append(db, dek, &item.id, &item.hashes.sha256, action, &check.detail))
 }
 
 /// Decrypt the stored copy to `dest`, through a temporary file next to it,
@@ -655,7 +655,7 @@ pub fn export_to(dir: &Path, item: &Item, key: &[u8; 32], dest: &Path, progress:
 
 pub fn record_export(db: &Connection, dek: &[u8; 32], item: &Item, check: &Check) -> Result<(), String> {
     let action = if check.ok { "exported" } else { "export_failed" };
-    crate::in_transaction(db, || append(db, dek, &item.id, &item.hashes.sha256, action, &check.detail))
+    crate::db::in_transaction(db, || append(db, dek, &item.id, &item.hashes.sha256, action, &check.detail))
 }
 
 pub fn add_note(db: &Connection, dek: &[u8; 32], item_id: &str, note: &str) -> Result<(), String> {
@@ -667,7 +667,7 @@ pub fn add_note(db: &Connection, dek: &[u8; 32], item_id: &str, note: &str) -> R
         return Err("note is too long".into());
     }
     let item = load(db, dek, item_id)?;
-    crate::in_transaction(db, || append(db, dek, item_id, &item.hashes.sha256, "note", note))
+    crate::db::in_transaction(db, || append(db, dek, item_id, &item.hashes.sha256, "note", note))
 }
 
 /// Delete records inside the caller's transaction; returns the ids whose
@@ -700,7 +700,7 @@ pub fn delete(db: &Connection, dir: &Path, item_id: &str) -> Result<(), String> 
     if !exists {
         return Err("evidence not found".into());
     }
-    crate::in_transaction(db, || delete_records(db, &ids))?;
+    crate::db::in_transaction(db, || delete_records(db, &ids))?;
     remove_files(dir, &ids);
     crate::activity::log_action(db, "evidence_deleted", "a file was removed from a case");
     Ok(())

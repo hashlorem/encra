@@ -83,7 +83,7 @@ pub fn migrate_to_format_3(db: &Connection, dek: &[u8; 32]) -> Result<bool, Stri
     }
     snapshot_before_format_3(db)?;
 
-    crate::in_transaction(db, || {
+    crate::db::in_transaction(db, || {
         let mut unreadable = 0usize;
         for (table, columns) in fields::ALL {
             let select = format!("SELECT id, {} FROM {table}", columns.join(", "));
@@ -165,7 +165,7 @@ pub fn upgrade_kdf(db: &Connection, master_password: &str, dek: &[u8; 32]) -> Re
     let pass_hash = vault::hash_password_with(master_password, KdfParams::CURRENT)?;
     let params = KdfParams::CURRENT.encode();
 
-    crate::in_transaction(db, || {
+    crate::db::in_transaction(db, || {
         for (key, value) in [
             ("encrypted_dek", wrapped.as_str()),
             ("password_hash", pass_hash.as_str()),
