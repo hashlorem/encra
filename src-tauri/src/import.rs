@@ -53,7 +53,8 @@ pub struct Login {
     pub username: String,
     pub password: Zeroizing<String>,
     pub url: String,
-    pub notes: String,
+    /// Notes often hold recovery codes or security answers.
+    pub notes: Zeroizing<String>,
     pub totp: Option<totp::Config>,
 }
 
@@ -170,7 +171,7 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             parsed.skipped.no_name += 1;
             continue;
         }
-        let notes = get(columns.notes);
+        let notes = Zeroizing::new(get(columns.notes));
         if service.len() > MAX_FIELD_CHARS
             || username.len() > MAX_FIELD_CHARS
             || url.len() > MAX_FIELD_CHARS
@@ -180,7 +181,7 @@ pub fn parse(text: &str) -> Result<Parsed, String> {
             parsed.skipped.too_long += 1;
             continue;
         }
-        let otp = get(columns.totp);
+        let otp = Zeroizing::new(get(columns.totp));
         let totp = if otp.is_empty() {
             None
         } else {
@@ -267,7 +268,7 @@ mod tests {
         assert_eq!(chrome.logins.len(), 2);
         assert_eq!(chrome.logins[1].service, "Bank, savings");
         assert_eq!(chrome.logins[1].password.as_str(), "pa,ss\"word", "quotes and commas survive");
-        assert_eq!(chrome.logins[1].notes, "line one\nline two", "newlines in notes survive");
+        assert_eq!(chrome.logins[1].notes.as_str(), "line one\nline two", "newlines in notes survive");
 
         let firefox = parse(FIREFOX).unwrap();
         assert_eq!(firefox.format, Format::Firefox);
@@ -276,7 +277,7 @@ mod tests {
         let apple = parse(APPLE).unwrap();
         assert_eq!(apple.format, Format::Apple);
         assert_eq!(apple.logins.len(), 2);
-        assert_eq!(apple.logins[0].totp.as_ref().unwrap().secret, "JBSWY3DPEHPK3PXP");
+        assert_eq!(apple.logins[0].totp.as_ref().unwrap().secret.as_str(), "JBSWY3DPEHPK3PXP");
         assert!(apple.logins[1].totp.is_none(), "Steam Guard can't be used");
         assert_eq!((apple.totp_unusable, apple.skipped.no_password), (1, 1));
 

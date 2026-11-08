@@ -828,8 +828,9 @@ Exports from Chrome, Edge, Brave, Firefox, Apple Passwords, Bitwarden and
 1Password (and any CSV with a password column) are read and parsed in Rust.
 
 - **The file.** Picked with a dialog opened from Rust, refused above 20 MiB
-  before any of it is read, and parsed into memory that is wiped when
-  dropped. No more than 50,000 rows.
+  before any of it is read, and parsed there, up to 50,000 rows. The file's
+  text and each login's password, notes and 2FA key are held in memory that
+  is wiped when dropped; names, usernames and websites are not.
 - **The preview** shows names, usernames and counts. Passwords and 2FA keys
   stay in Rust behind a one-time token that expires after 10 minutes and is
   cleared when the vault seals.
@@ -898,6 +899,10 @@ wording.
 - **QR images.** "Choose image…" used the webview's file input, so a QR image
   (which holds the 2FA key) passed through the page. Rust now opens the
   dialog and reads the file, under the same 25 MiB limit.
+- **2FA keys in memory.** `totp::Config` kept the key in an ordinary string
+  and printed it in debug output. The key, the decoded key bytes and the
+  stored form are now wiped when dropped, and debug output shows
+  `[hidden]` (tested).
 - **Appearance** (palette, light or dark, density, lock print) is stored in
   `localStorage` and applied before the lock screen draws. None of it is
   secret.

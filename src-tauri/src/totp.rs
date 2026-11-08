@@ -10,6 +10,7 @@ use hmac::{Hmac, Mac};
 use sha1::Sha1;
 use sha2::{Sha256, Sha512};
 use std::time::{SystemTime, UNIX_EPOCH};
+use zeroize::Zeroizing;
 
 const BASE32_ALPHABET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 const DEFAULT_PERIOD: u64 = 30;
@@ -38,13 +39,26 @@ impl Algorithm {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+/// A 2FA setup. The key is wiped from memory when the config is dropped, and
+/// Debug output never shows it.
+#[derive(Clone, PartialEq)]
 pub struct Config {
     /// Cleaned base32: uppercase, no spaces, dashes or padding.
-    pub secret: String,
+    pub secret: Zeroizing<String>,
     pub algorithm: Algorithm,
     pub digits: u32,
     pub period: u64,
+}
+
+impl std::fmt::Debug for Config {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Config")
+            .field("secret", &"[hidden]")
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("period", &self.period)
+            .finish()
+    }
 }
 
 impl Config {
@@ -58,23 +72,29 @@ impl Config {
         if input.to_ascii_lowercase().starts_with("otpauth-migration://") {
             return Err("that is an authenticator app export, not a service's setup code".into());
         }
-        let secret = clean_secret(input);
+        let secret = Zeroizing::new(clean_secret(input));
         validate_secret(&secret)?;
         Ok(Self { secret, algorithm: Algorithm::Sha1, digits: DEFAULT_DIGITS, period: DEFAULT_PERIOD })
     }
 
     /// What goes in the vault: the bare key when the settings are the
     /// defaults, so existing data and backups keep their shape.
-    pub fn to_stored(&self) -> String {
+    pub fn to_stored(&self) -> Zeroizing<String> {
         if self.algorithm == Algorithm::Sha1 && self.digits == DEFAULT_DIGITS && self.period == DEFAULT_PERIOD {
             return self.secret.clone();
         }
-        format!("otpauth://totp/?secret={}&algorithm={}&digits={}&period={}", self.secret, self.algorithm.name(), self.digits, self.period)
+        Zeroizing::new(format!(
+            "otpauth://totp/?secret={}&algorithm={}&digits={}&period={}",
+            self.secret.as_str(),
+            self.algorithm.name(),
+            self.digits,
+            self.period
+        ))
     }
 
     /// The code for a moment in time.
     pub fn code_at(&self, unix_seconds: u64) -> Result<String, String> {
-        let key = base32_decode(&self.secret)?;
+        let key = Zeroizing::new(base32_decode(&self.secret)?);
         if key.is_empty() {
             return Err("secret decodes to zero bytes".into());
         }
@@ -121,12 +141,12 @@ fn parse_link(rest: &str) -> Result<Config, String> {
         return Err("not a one-time code link".into());
     }
     let query = rest.split_once('?').map(|(_, q)| q).unwrap_or("");
-    let mut config = Config { secret: String::new(), algorithm: Algorithm::Sha1, digits: DEFAULT_DIGITS, period: DEFAULT_PERIOD };
+    let mut config = Config { secret: Zeroizing::new(String::new()), algorithm: Algorithm::Sha1, digits: DEFAULT_DIGITS, period: DEFAULT_PERIOD };
     for pair in query.split('&').filter(|p| !p.is_empty()) {
         let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
-        let value = percent_decode(value)?;
+        let value = Zeroizing::new(percent_decode(value)?);
         match name.to_ascii_lowercase().as_str() {
-            "secret" => config.secret = clean_secret(&value),
+            "secret" => config.secret = Zeroizing::new(clean_secret(&value)),
             "algorithm" => {
                 config.algorithm = match value.to_ascii_uppercase().as_str() {
                     "SHA1" => Algorithm::Sha1,
@@ -178,8 +198,8 @@ fn from_stored(stored: &str) -> Result<Config, String> {
     if stored.trim().to_ascii_lowercase().starts_with("otpauth://") {
         return Config::parse(stored);
     }
-    let secret = clean_secret(stored);
-    if base32_decode(&secret)?.is_empty() {
+    let secret = Zeroizing::new(clean_secret(stored));
+    if Zeroizing::new(base32_decode(&secret)?).is_empty() {
         return Err("secret decodes to zero bytes".into());
     }
     Ok(Config { secret, algorithm: Algorithm::Sha1, digits: DEFAULT_DIGITS, period: DEFAULT_PERIOD })
@@ -272,7 +292,7 @@ mod tests {
             (Algorithm::Sha512, "1234567890123456789012345678901234567890123456789012345678901234", ["90693936", "25091201", "47863826"]),
         ];
         for (algorithm, seed, expected) in cases {
-            let config = Config { secret: base32(seed.as_bytes()), algorithm, digits: 8, period: 30 };
+            let config = Config { secret: Zeroizing::new(base32(seed.as_bytes())), algorithm, digits: 8, period: 30 };
             for (time, code) in [59, 1111111109, 20000000000].into_iter().zip(expected) {
                 assert_eq!(config.code_at(time).unwrap(), code, "{algorithm:?} at {time}");
             }
@@ -283,9 +303,10 @@ mod tests {
     fn test_setup_keys_and_links() {
         // Services often show the key in lowercase groups.
         let plain = Config::parse(" jbsw y3dp-ehpk 3pxp ").unwrap();
-        assert_eq!(plain.secret, "JBSWY3DPEHPK3PXP");
+        assert_eq!(plain.secret.as_str(), "JBSWY3DPEHPK3PXP");
+        assert!(!format!("{plain:?}").contains("JBSWY3DPEHPK3PXP"), "Debug output hides the key");
         assert_eq!((plain.algorithm, plain.digits, plain.period), (Algorithm::Sha1, 6, 30));
-        assert_eq!(plain.to_stored(), "JBSWY3DPEHPK3PXP", "defaults store the bare key, as older vaults do");
+        assert_eq!(plain.to_stored().as_str(), "JBSWY3DPEHPK3PXP", "defaults store the bare key, as older vaults do");
 
         let link = Config::parse("otpauth://totp/Example%20Co:me%40example.com?secret=JBSWY3DPEHPK3PXP&issuer=Example%20Co&algorithm=sha256&digits=8&period=60").unwrap();
         assert_eq!((link.algorithm, link.digits, link.period), (Algorithm::Sha256, 8, 60));
