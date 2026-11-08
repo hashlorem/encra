@@ -17,6 +17,8 @@ rand = "0.8"
 hmac = "0.12"
 sha1 = "0.10"
 sha2 = "0.10"
+# MD5 only to match hashes other tools list for evidence; never for security
+md-5 = "0.10"
 base64 = "0.22"
 subtle = "2"
 zeroize = "1"
@@ -54,3 +56,20 @@ opt-level = 3
 
 [profile.dev.package.blake2]
 opt-level = 3
+
+# The same for the ciphers and hashes the evidence locker streams files through.
+[profile.dev.package.aes-gcm]
+opt-level = 3
+[profile.dev.package.aes]
+opt-level = 3
+[profile.dev.package.ghash]
+opt-level = 3
+[profile.dev.package.polyval]
+opt-level = 3
+[profile.dev.package.sha2]
+opt-level = 3
+[profile.dev.package.sha1]
+opt-level = 3
+[profile.dev.package.md-5]
+opt-level = 3
+

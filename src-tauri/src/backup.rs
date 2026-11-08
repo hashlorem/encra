@@ -21,6 +21,10 @@ pub struct VaultBackup {
     pub projects: Vec<BackupProject>,
     pub journal_entries: Vec<BackupJournalEntry>,
     pub kb_entries: Vec<BackupKBEntry>,
+    /// Evidence records and custody history, without the files. Absent in
+    /// backups made before the evidence locker.
+    #[serde(default)]
+    pub evidence: Vec<crate::evidence::BackupEvidence>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -238,12 +242,15 @@ pub fn collect_all(conn: &Connection, dek: &[u8; 32]) -> Result<VaultBackup, Str
         });
     }
 
+    let evidence = crate::evidence::backup_records(conn, dek, &project_names)?;
+
     Ok(VaultBackup {
         version: BACKUP_VERSION.into(),
         credentials: out_credentials,
         projects: out_projects,
         journal_entries: out_entries,
         kb_entries: out_kb,
+        evidence,
     })
 }
 
@@ -320,6 +327,7 @@ fn ensure_projects_exist(backup: &mut VaultBackup) {
         .journal_entries
         .iter()
         .map(|e| e.project_name.clone())
+        .chain(backup.evidence.iter().map(|e| e.project_name.clone()))
         .collect();
 
     for name in referenced {
@@ -414,6 +422,8 @@ pub fn restore_all(conn: &Connection, dek: &[u8; 32], backup: &VaultBackup) -> R
             )
             .map_err(|e| e.to_string())?;
         }
+
+        crate::evidence::restore_records(conn, dek, &project_map, &backup.evidence)?;
 
         for entry in &backup.kb_entries {
             let id = uuid_v4();

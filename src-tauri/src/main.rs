@@ -14,6 +14,7 @@ mod credentials;
 mod fields;
 mod migrate;
 mod qr;
+mod evidence;
 mod util;
 
 use std::path::{Path, PathBuf};
@@ -897,16 +898,180 @@ fn get_projects(state: tauri::State<AppState>) -> Result<Vec<journal::Project>, 
 }
 
 #[tauri::command]
-fn delete_project(state: tauri::State<AppState>, id: String) -> Result<(), String> {
+fn delete_project(state: tauri::State<AppState>, dir: tauri::State<EvidenceDir>, id: String) -> Result<(), String> {
     let _key = require_unlocked(&state)?;
     let db = require_db(&state)?;
-    // The entries and the project must disappear together: a crash between the
-    // two deletes used to leave orphaned entries behind.
-    in_transaction(&db, || {
+    let evidence_ids = delete_project_records(&db, &id)?;
+    evidence::remove_files(&dir.0, &evidence_ids);
+    Ok(())
+}
+
+/// The case, its entries and its evidence records disappear together: a crash
+/// between deletes used to leave orphaned entries behind. Returns the evidence
+/// whose files to remove now that the records are gone.
+fn delete_project_records(db: &Connection, id: &str) -> Result<Vec<String>, String> {
+    in_transaction(db, || {
+        let evidence_ids = evidence::ids_in_case(db, id)?;
+        evidence::delete_records(db, &evidence_ids)?;
         db.execute("DELETE FROM journal_entries WHERE project_id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
         db.execute("DELETE FROM projects WHERE id = ?1", rusqlite::params![id]).map_err(|e| e.to_string())?;
-        Ok(())
-    })?;
+        Ok(evidence_ids)
+    })
+}
+
+// ===== Evidence =====
+
+/// Where evidence files live, beside the vault.
+struct EvidenceDir(PathBuf);
+
+/// Files dropped on the window, held in Rust so the webview never supplies a
+/// path. A case claims them shortly after the drop or they are forgotten.
+#[derive(Default)]
+struct DroppedFiles(Mutex<Option<(std::time::Instant, Vec<PathBuf>)>>);
+
+const DROP_CLAIM_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
+
+#[derive(Clone, serde::Serialize)]
+struct EvidenceProgress {
+    name: String,
+    done: u64,
+    total: u64,
+}
+
+#[tauri::command]
+fn list_evidence(state: tauri::State<AppState>, dir: tauri::State<EvidenceDir>, project_id: String) -> Result<Vec<evidence::Item>, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    evidence::list(&db, &key, &dir.0, &project_id)
+}
+
+/// Read, hash and store each file, then record it. Files are read without
+/// holding the database, and the vault is checked again before recording.
+async fn add_evidence_files(app: tauri::AppHandle, project_id: String, paths: Vec<PathBuf>, note: String) -> Result<Vec<evidence::Item>, String> {
+    let state = app.state::<AppState>();
+    require_unlocked(&state)?;
+    check_field(&note, "note", evidence::MAX_NOTE_CHARS)?;
+    let dir = app.state::<EvidenceDir>().0.clone();
+    let mut added = Vec::new();
+    for path in paths {
+        let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+        let (emitter, staging_dir) = (app.clone(), dir.clone());
+        let staged = tauri::async_runtime::spawn_blocking(move || {
+            evidence::stage(&staging_dir, &path, &mut |done, total| {
+                let _ = emitter.emit("evidence-progress", EvidenceProgress { name: name.clone(), done, total });
+            })
+        })
+        .await
+        .map_err(|e| e.to_string())??;
+        let key = match require_unlocked(&state) {
+            Ok(key) => key,
+            Err(error) => {
+                evidence::discard(&dir, staged);
+                return Err(error);
+            }
+        };
+        let db = require_db(&state)?;
+        added.push(evidence::commit(&db, &key, &dir, &project_id, staged, &note)?);
+        seal_log(&db, &key);
+    }
+    Ok(added)
+}
+
+/// Pick files with the system dialog, opened from Rust.
+#[tauri::command]
+async fn add_evidence(app: tauri::AppHandle, project_id: String, note: String) -> Result<Vec<evidence::Item>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    require_unlocked(&app.state::<AppState>())?;
+    let picked = app.dialog().file().set_title("Add evidence").blocking_pick_files().unwrap_or_default();
+    let paths = picked.into_iter().filter_map(|p| p.into_path().ok()).collect();
+    add_evidence_files(app, project_id, paths, note).await
+}
+
+/// Add the files most recently dropped on the window.
+#[tauri::command]
+async fn add_dropped_evidence(app: tauri::AppHandle, project_id: String, note: String) -> Result<Vec<evidence::Item>, String> {
+    let dropped = app.state::<DroppedFiles>().0.lock().map_err(|e| e.to_string())?.take();
+    let paths = match dropped {
+        Some((at, paths)) if at.elapsed() < DROP_CLAIM_WINDOW => paths,
+        _ => return Ok(Vec::new()),
+    };
+    add_evidence_files(app, project_id, paths, note).await
+}
+
+#[tauri::command]
+async fn verify_evidence(app: tauri::AppHandle, id: String) -> Result<evidence::Check, String> {
+    let state = app.state::<AppState>();
+    let dir = app.state::<EvidenceDir>().0.clone();
+    let (item, file_key) = {
+        let key = require_unlocked(&state)?;
+        let db = require_db(&state)?;
+        evidence::open_item(&db, &key, &id)?
+    };
+    let (emitter, name, total) = (app.clone(), item.name.clone(), item.size);
+    let (check_item, check_dir) = (item.clone(), dir.clone());
+    let check = tauri::async_runtime::spawn_blocking(move || {
+        evidence::check(&check_dir, &check_item.id, &file_key, &check_item.hashes, &mut |done| {
+            let _ = emitter.emit("evidence-progress", EvidenceProgress { name: name.clone(), done, total });
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    evidence::record_check(&db, &key, &item, &check)?;
+    Ok(check)
+}
+
+/// Save a checked copy where the person chooses. None if they cancel.
+#[tauri::command]
+async fn export_evidence(app: tauri::AppHandle, id: String) -> Result<Option<evidence::Check>, String> {
+    use tauri_plugin_dialog::DialogExt;
+    let state = app.state::<AppState>();
+    let dir = app.state::<EvidenceDir>().0.clone();
+    let (item, file_key) = {
+        let key = require_unlocked(&state)?;
+        let db = require_db(&state)?;
+        evidence::open_item(&db, &key, &id)?
+    };
+    let Some(dest) = app.dialog().file().set_title("Export evidence").set_file_name(&item.name).blocking_save_file() else {
+        return Ok(None);
+    };
+    let dest = dest.into_path().map_err(|e| e.to_string())?;
+    let (emitter, name, total) = (app.clone(), item.name.clone(), item.size);
+    let (export_item, export_dir) = (item.clone(), dir.clone());
+    let check = tauri::async_runtime::spawn_blocking(move || {
+        evidence::export_to(&export_dir, &export_item, &file_key, &dest, &mut |done| {
+            let _ = emitter.emit("evidence-progress", EvidenceProgress { name: name.clone(), done, total });
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    evidence::record_export(&db, &key, &item, &check)?;
+    Ok(Some(check))
+}
+
+#[tauri::command]
+fn evidence_custody(state: tauri::State<AppState>, id: String) -> Result<evidence::Custody, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    evidence::custody(&db, &key, &id)
+}
+
+#[tauri::command]
+fn add_evidence_note(state: tauri::State<AppState>, id: String, note: String) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    evidence::add_note(&db, &key, &id, &note)
+}
+
+#[tauri::command]
+fn delete_evidence(state: tauri::State<AppState>, dir: tauri::State<EvidenceDir>, id: String) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    evidence::delete(&db, &dir.0, &id)?;
+    seal_log(&db, &key);
     Ok(())
 }
 
@@ -1460,6 +1625,13 @@ fn main() {
             kb::init_kb_tables(&conn).map_err(std::io::Error::other)?;
             activity::init_activity_table(&conn).map_err(std::io::Error::other)?;
             agent::refs::init_alias_table(&conn).map_err(std::io::Error::other)?;
+            evidence::init_tables(&conn).map_err(std::io::Error::other)?;
+            let evidence_dir = evidence::dir_for(&db_path);
+            if let Err(error) = evidence::sweep(&conn, &evidence_dir) {
+                eprintln!("Encra could not tidy the evidence folder: {error}");
+            }
+            app.manage(EvidenceDir(evidence_dir));
+            app.manage(DroppedFiles::default());
 
             // Enable foreign keys
             conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -1528,6 +1700,17 @@ fn main() {
             tray.set_visible(enabled)?;
             Ok(())
         })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
+                if paths.is_empty() {
+                    return;
+                }
+                if let Ok(mut dropped) = window.state::<DroppedFiles>().0.lock() {
+                    *dropped = Some((std::time::Instant::now(), paths.clone()));
+                }
+                let _ = window.emit("evidence-dropped", paths.len());
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             list_credentials, get_credential, reveal_password, get_totp,
             copy_credential_field, copy_text, check_credential_breach,
@@ -1538,6 +1721,8 @@ fn main() {
             setup_totp, setup_totp_from_clipboard, setup_totp_from_image, remove_totp,
             check_hibp,
             create_project, get_projects, delete_project,
+            list_evidence, add_evidence, add_dropped_evidence, verify_evidence, export_evidence,
+            evidence_custody, add_evidence_note, delete_evidence,
             add_entry, add_entries, get_entries, delete_entry,
             parse_nmap,
             add_kb_entry, get_kb_entries, delete_kb_entry,
@@ -3004,6 +3189,7 @@ mod tests {
         journal::init_journal_tables(&conn).unwrap();
         kb::init_kb_tables(&conn).unwrap();
         activity::init_activity_table(&conn).unwrap();
+        evidence::init_tables(&conn).unwrap();
         conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
 
         let dek = vault::generate_dek();
@@ -3062,8 +3248,17 @@ mod tests {
             seed_vault(&conn, &source_dek);
             bring_up_to_date(&conn, "source-password-123", &source_dek).unwrap();
 
+            // Evidence: the record and its history travel, the file does not.
+            let file = dir.join("auth.log");
+            std::fs::write(&file, b"Failed password for root from 10.0.0.7").unwrap();
+            let staged = evidence::stage(&dir.join("evidence"), &file, &mut |_, _| {}).unwrap();
+            let item = evidence::commit(&conn, &source_dek, &dir.join("evidence"), "p1", staged, "").unwrap();
+            evidence::add_note(&conn, &source_dek, &item.id, "Copied off the lab VM").unwrap();
+
             let backup = backup::collect_all(&conn, &source_dek).unwrap();
             assert_eq!(backup.version, "1.1");
+            assert_eq!(backup.evidence.len(), 1);
+            assert_eq!(backup.evidence[0].custody.len(), 2);
             // Flatten through JSON exactly as the real export path does.
             let json = serde_json::to_string(&backup).unwrap();
             std::fs::write(dir.join("backup.json"), json).unwrap();
@@ -3124,6 +3319,17 @@ mod tests {
             assert_eq!(open("kb_entries", &kid, "description", &kb_desc), "standard shell");
             assert_eq!(open("kb_entries", &kid, "tags", &kb_tags), "shell,bash");
 
+            let restored = evidence::list(&conn, key, &dir.join("destination-evidence"), &pid).unwrap();
+            assert_eq!(restored.len(), 1);
+            assert_eq!(restored[0].name, "auth.log");
+            assert_eq!(restored[0].hashes.sha256, "ed8e23c5b675f78bc47d0e299f3ad8558cf844ad1ff6ee61d827c76ea0f62373", "hash travels with the record");
+            assert!(!restored[0].stored, "only the record was restored");
+            let record = evidence::custody(&conn, key, &restored[0].id).unwrap();
+            assert!(record.status.intact, "{:?}", record.status.problem);
+            let actions: Vec<&str> = record.events.iter().map(|e| e.action.as_str()).collect();
+            assert_eq!(actions, ["added", "note", "restored"]);
+            assert_eq!(record.events[1].detail, "Copied off the lab VM");
+
             // Proof that re-encryption really happened: the source key must not
             // be able to read anything the destination now stores.
             assert!(fields::open(&source_dek, "projects", &pid, "name", &name).is_err(), "source key must not read imported cases");
@@ -3131,6 +3337,32 @@ mod tests {
             assert!(fields::open(&source_dek, "kb_entries", &kid, "title", &kb_title).is_err(), "source key must not read imported commands");
         }
 
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn test_deleting_a_case_removes_its_evidence() {
+        let dir = migration_test_dir("case-delete");
+        let path = dir.join("vault.db");
+        let dek = create_test_vault(&path, "a-long-master-password");
+        let conn = Connection::open(&path).unwrap();
+        seed_vault(&conn, &dek);
+        bring_up_to_date(&conn, "a-long-master-password", &dek).unwrap();
+        let evidence_dir = dir.join("evidence");
+        let file = dir.join("dump.raw");
+        std::fs::write(&file, b"memory").unwrap();
+        let staged = evidence::stage(&evidence_dir, &file, &mut |_, _| {}).unwrap();
+        let item = evidence::commit(&conn, &dek, &evidence_dir, "p1", staged, "").unwrap();
+        assert!(evidence_dir.join(format!("{}.enc", item.id)).exists());
+
+        let ids = delete_project_records(&conn, "p1").unwrap();
+        evidence::remove_files(&evidence_dir, &ids);
+        assert_eq!(ids, std::slice::from_ref(&item.id));
+        assert!(!evidence_dir.join(format!("{}.enc", item.id)).exists());
+        for table in ["evidence_items", "evidence_custody", "journal_entries", "projects"] {
+            assert_eq!(conn.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get::<_, i64>(0)).unwrap(), 0, "{table}");
+        }
+        drop(conn);
         std::fs::remove_dir_all(dir).unwrap();
     }
 
@@ -3189,6 +3421,7 @@ mod tests {
             projects: vec![],
             journal_entries: vec![],
             kb_entries: vec![],
+            evidence: vec![],
         }
     }
 
@@ -3234,6 +3467,7 @@ mod tests {
                 created_at: "2026-01-01".into(),
             }],
             kb_entries: vec![],
+            evidence: vec![],
         };
 
         let prepared = backup::prepare_for_import(payload, &dek).unwrap();
