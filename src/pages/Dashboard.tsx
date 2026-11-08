@@ -2,7 +2,9 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import { listen } from "@tauri-apps/api/event";
 import { AgentRequestDialog } from "../components/AgentRequestDialog";
-import type { AgentRequest } from "../lib/types";
+import { CommandPalette } from "../components/CommandPalette";
+import type { AgentRequest, PaletteHit } from "../lib/types";
+import type { Module, PageRequest, Requested, ToolId } from "../lib/navigation";
 import Vault from "./Vault";
 import Journal from "./Journal";
 import Tools from "./Tools";
@@ -11,15 +13,15 @@ import Settings from "./Settings";
 import { Print } from "../components/Print";
 import { Wordmark } from "../components/Wordmark";
 import { playUnlockChime, playLockChime, playRequestChime } from "../lib/chime";
+import { useTheme } from "../lib/ThemeContext";
 import {
   PREFERENCE_KEYS,
   readBooleanPreference,
   readPreference,
 } from "../lib/preferences";
 
-type Module = "vault" | "journal" | "tools" | "activity" | "settings";
 /** Why the vault was sealed; Rust turns this into the log wording. */
-type SealReason = "button" | "shortcut" | "idle" | "app_switch";
+type SealReason = "button" | "shortcut" | "idle" | "app_switch" | "palette";
 
 const AUTO_LOCK_MINUTES = 5;
 const DEFAULT_LOCK_BINDING = "meta+l";
@@ -52,9 +54,20 @@ interface DashboardProps {
 }
 
 function Dashboard({ onLock }: DashboardProps) {
+  const { lockPrint } = useTheme();
   const [active, setActive] = useState<Module>("vault");
   const [sealing, setSealing] = useState(false);
   const [agentRequests, setAgentRequests] = useState<AgentRequest[]>([]);
+  const [paletteOpen, setPaletteOpen] = useState(false);
+  // What the palette asked the page to do. The rail clears it, so returning
+  // to a page later doesn't repeat it.
+  const [requested, setRequested] = useState<Requested | null>(null);
+  const requestSeq = useRef(0);
+
+  const go = useCallback((module: Module, request?: PageRequest) => {
+    setActive(module);
+    setRequested(request ? { seq: ++requestSeq.current, request } : null);
+  }, []);
 
   // Requests from `encra run`: any that arrived while sealed, then each new one.
   const loadAgentRequests = useCallback(() => {
@@ -156,9 +169,17 @@ function Dashboard({ onLock }: DashboardProps) {
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (event.key === "k" && (event.metaKey || event.ctrlKey)) {
+      const command = event.metaKey || event.ctrlKey;
+      if (command && !event.shiftKey && !event.altKey && event.code === "KeyK") {
         event.preventDefault();
-        window.dispatchEvent(new CustomEvent("encra:search-focus"));
+        // ⌘K again closes it. It never opens over another dialog: two focus
+        // traps would fight.
+        setPaletteOpen((open) => !open && !document.querySelector(".dialog-backdrop"));
+        return;
+      }
+      if (command && !event.shiftKey && !event.altKey && event.code === "KeyF") {
+        event.preventDefault();
+        if (!document.querySelector(".dialog-backdrop")) window.dispatchEvent(new CustomEvent("encra:search-focus"));
         return;
       }
 
@@ -194,6 +215,22 @@ function Dashboard({ onLock }: DashboardProps) {
     };
   }, [autoLockBlur, handleImmediateLock]);
 
+  /** Where a palette result leads. */
+  const openHit = useCallback((hit: PaletteHit) => {
+    setPaletteOpen(false);
+    if (hit.group === "login") return go("vault", { kind: "login", id: hit.id });
+    if (hit.group === "case") return go("journal", { kind: "case", id: hit.id });
+    if (hit.group === "command") return go("tools", { kind: "tool", tool: "kb", search: hit.title });
+    const [type, name] = hit.id.split(":");
+    if (type === "page") return go(name as Module);
+    if (type === "tool") return go("tools", { kind: "tool", tool: name as ToolId });
+    if (name === "new-login") return go("vault", { kind: "new-login" });
+    if (name === "new-case") return go("journal", { kind: "new-case" });
+    if (name === "import") return go("vault", { kind: "import" });
+    if (name === "checkup") return go("vault", { kind: "checkup" });
+    if (name === "seal") void handleLock("palette");
+  }, [go, handleLock]);
+
   // Switching module unmounts the previous page, which otherwise drops focus to
   // the document body.
   useEffect(() => {
@@ -212,7 +249,7 @@ function Dashboard({ onLock }: DashboardProps) {
           {NAV_ITEMS.map(({ id, label }) => (
             <button
               key={id}
-              onClick={() => setActive(id)}
+              onClick={() => go(id)}
               aria-current={active === id ? "page" : undefined}
             >
               {label}
@@ -220,7 +257,7 @@ function Dashboard({ onLock }: DashboardProps) {
           ))}
         </nav>
         <button className="seal" onClick={() => void handleLock("button")} disabled={sealing}>
-          <Print kind="loop" />
+          <Print kind={lockPrint} />
           <span className="seal-copy">
             <span>
               <strong>Seal</strong>{" "}
@@ -235,11 +272,13 @@ function Dashboard({ onLock }: DashboardProps) {
         <AgentRequestDialog key={agentRequests[0].id} request={agentRequests[0]} onDone={loadAgentRequests} />
       )}
 
+      {paletteOpen && !agentRequests[0] && <CommandPalette onClose={() => setPaletteOpen(false)} onOpen={openHit} />}
+
       <main className="workspace" ref={contentRef} tabIndex={-1}>
         <div key={active} className="view">
-          {active === "vault" && <Vault />}
-          {active === "journal" && <Journal />}
-          {active === "tools" && <Tools />}
+          {active === "vault" && <Vault requested={requested} />}
+          {active === "journal" && <Journal requested={requested} />}
+          {active === "tools" && <Tools requested={requested} />}
           {active === "activity" && <Activity />}
           {active === "settings" && <Settings />}
         </div>

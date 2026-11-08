@@ -1,5 +1,7 @@
+export type PrintKind = "whorl" | "loop" | "arch";
+
 interface PrintProps {
-  kind: "whorl" | "loop" | "arch";
+  kind: PrintKind;
   className?: string;
 }
 

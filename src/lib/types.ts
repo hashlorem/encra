@@ -225,3 +225,86 @@ export interface OpenedScan {
   scan: NmapScan;
 }
 
+/** Rows left out of an import, by reason. */
+export interface ImportSkipped {
+  no_password: number;
+  no_name: number;
+  too_long: number;
+  not_a_login: number;
+  duplicate: number;
+}
+
+/** A previewed import, held in Rust behind `token`. No passwords or 2FA keys. */
+export interface ImportPreview {
+  token: string;
+  file_name: string;
+  /** Where the file is, with the home folder as ~. */
+  location: string;
+  /** "Apple Passwords", "Bitwarden", "a CSV export", … */
+  source: string;
+  ready: number;
+  with_totp: number;
+  totp_unusable: number;
+  skipped: ImportSkipped;
+  sample: { service: string; username: string }[];
+}
+
+export interface LoginRef {
+  id: string;
+  service: string;
+  username: string;
+}
+
+/** The vault check-up: flags only, never a password or anything about one. */
+export interface Checkup {
+  total: number;
+  /** Groups of two or more logins sharing one password. */
+  reused: LoginRef[][];
+  weak: LoginRef[];
+  old: { login: LoginRef; since: string }[];
+  breached: { login: LoginRef; count: number; checked_at: string }[];
+  /** Logins with a password the breach check hasn't seen yet. */
+  unchecked: number;
+  last_checked: string | null;
+}
+
+export interface CheckProgress {
+  done: number;
+  total: number;
+}
+
+/** One ⌘K result: names and ids only. */
+export interface PaletteHit {
+  group: "login" | "case" | "command" | "go";
+  /** A login, case or command id, or a page, tool or action name. */
+  id: string;
+  title: string;
+  subtitle: string;
+  /** Character positions in `title` that matched the query. */
+  matched: number[];
+  has_totp: boolean;
+}
+
+export type IndicatorKind = "domain" | "url" | "ipv4" | "ipv6" | "email" | "sha256" | "sha1" | "md5" | "cve";
+
+/** An indicator found in a case's notes or evidence. */
+export interface Indicator {
+  kind: IndicatorKind;
+  value: string;
+  defanged: string;
+  note: "internal" | "documentation range" | "possible domain" | null;
+  /** Entry titles and evidence file names it was found in. */
+  sources: string[];
+}
+
+export interface TimelineEvent {
+  at: string;
+  source: "case" | "entry" | "evidence";
+  title: string;
+  detail: string;
+  entry_type: string | null;
+  severity: string | null;
+  /** For evidence: added, verified, exported, note, … */
+  action: string | null;
+}
+

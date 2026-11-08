@@ -50,6 +50,7 @@ const ERROR_MESSAGES: Array<[prefix: string, message: string]> = [
   ["the file is too large", "That file is too large."],
   ["that case no longer exists", "That case no longer exists."],
   ["evidence not found", "That evidence no longer exists."],
+  ["that indicator is no longer in this case", "That indicator is no longer in this case."],
   ["note must not be empty", "Write a note first."],
   ["note is too long", "That note is too long."],
   ["credential not found", "That login no longer exists."],
@@ -72,6 +73,7 @@ const ERROR_MESSAGES: Array<[prefix: string, message: string]> = [
   ["cannot be decrypted with this vault's key", "That backup belongs to a different vault and cannot be restored here."],
   ["import failed", "Import failed. Nothing was changed in your vault."],
   ["HIBP API unreachable", "Could not reach the breach-check service."],
+  ["a breach check is already running", "A breach check is already running."],
   ["is too long", "One of the fields is too long."],
   ["must not be empty", "A required field is empty."],
 ];

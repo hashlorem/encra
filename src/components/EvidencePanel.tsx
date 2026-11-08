@@ -58,16 +58,18 @@ function CustodyTimeline({ custody }: { custody: Custody }) {
   );
 }
 
-function Hashes({ item, copy, copiedId }: { item: EvidenceItem; copy: (text: string, id: string) => void; copiedId: string | null }) {
-  const rows: [string, string][] = [["SHA-256", item.hashes.sha256], ["SHA-1", item.hashes.sha1], ["MD5", item.hashes.md5]];
+type HashName = "sha256" | "sha1" | "md5";
+
+function Hashes({ item, copy, copiedId }: { item: EvidenceItem; copy: (algorithm: HashName, id: string) => void; copiedId: string | null }) {
+  const rows: [string, HashName][] = [["SHA-256", "sha256"], ["SHA-1", "sha1"], ["MD5", "md5"]];
   return (
     <dl className="facts hashes">
-      {rows.map(([label, value]) => (
+      {rows.map(([label, algorithm]) => (
         <div key={label} className="fact-pair">
           <dt>{label}</dt>
           <dd>
-            <span className="fact-value mono">{value}</span>
-            <button className="btn-text no-print" onClick={() => copy(value, `${item.id}:${label}`)}>
+            <span className="fact-value mono">{item.hashes[algorithm]}</span>
+            <button className="btn-text no-print" onClick={() => copy(algorithm, `${item.id}:${label}`)}>
               <span key={copiedId === `${item.id}:${label}` ? "done" : "idle"} className="fade">
                 {copiedId === `${item.id}:${label}` ? "Copied" : "Copy"}
               </span>
@@ -104,7 +106,7 @@ export function EvidencePanel({ projectId, dropToken, onCount }: EvidencePanelPr
   const [note, setNote] = useState("");
   const [pendingDelete, setPendingDelete] = useState<EvidenceItem | null>(null);
   const [printing, setPrinting] = useState(false);
-  const { copyText, copiedId } = useClipboard();
+  const { copyVia, copiedId } = useClipboard();
   const lastDrop = useRef(dropToken);
 
   const load = useCallback(async () => {
@@ -242,7 +244,7 @@ export function EvidencePanel({ projectId, dropToken, onCount }: EvidencePanelPr
       </div>
 
       {busy && (
-        <div className="evidence-progress fade" role="status">
+        <div className="progress-line fade" role="status">
           <span className="meta">
             {busy} {progress?.name ?? "…"}{percent !== null && `, ${percent}%`}
           </span>
@@ -274,7 +276,15 @@ export function EvidencePanel({ projectId, dropToken, onCount }: EvidencePanelPr
 
               {open && (
                 <div className="evidence-detail rise">
-                  <Hashes item={item} copy={(text, id) => void copyText(text, id)} copiedId={copiedId} />
+                  <Hashes
+                    item={item}
+                    copy={(algorithm, id) =>
+                      void copyVia("copy_evidence_hash", { id: item.id, algorithm }, id).catch((err) =>
+                        setError(describeError(err, "Couldn’t copy that.")),
+                      )
+                    }
+                    copiedId={copiedId}
+                  />
                   {!item.stored && (
                     <p className="meta">This vault holds the record only. The file was not part of the backup it came from.</p>
                   )}

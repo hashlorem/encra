@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { Print } from "../components/Print";
 import { Wordmark } from "../components/Wordmark";
 import { describeError } from "../lib/errors";
+import { useTheme } from "../lib/ThemeContext";
 import { formatTime } from "../lib/format";
 import { APP_VERSION } from "../lib/appInfo";
 
@@ -19,6 +20,7 @@ function prefersReducedMotion() {
 }
 
 function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
+  const { lockPrint } = useTheme();
   const [mode, setMode] = useState<"unlock" | "recover">("unlock");
   const [password, setPassword] = useState("");
   const [showPassword, setShowPassword] = useState(false);
@@ -98,7 +100,7 @@ function LockScreen({ lockedAt, onUnlock }: LockScreenProps) {
   return (
     <div className={`lock${opening ? " is-opening" : ""}`}>
       <div className="lock-art">
-        <Print kind="whorl" />
+        <Print kind={lockPrint} />
       </div>
 
       <main className="lock-panel">

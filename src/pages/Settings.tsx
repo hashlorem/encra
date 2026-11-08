@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { useTheme, type Theme } from "../lib/ThemeContext";
+import { AppearanceSettings } from "../components/AppearanceSettings";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import {
@@ -16,11 +16,7 @@ import type { AgentStatus } from "../lib/types";
 import { useClipboard } from "../lib/useClipboard";
 import { APP_NAME, APP_VERSION } from "../lib/appInfo";
 
-const THEME_OPTIONS: readonly Theme[] = ["light", "dark", "system"];
-
 function Settings() {
-  const { theme, set: setTheme } = useTheme();
-
   const [backupPassword, setBackupPassword] = useState("");
   const [backupMsg, setBackupMsg] = useState("");
   const [exporting, setExporting] = useState(false);
@@ -387,17 +383,7 @@ function Settings() {
           <div>
             <h2 id="appearance-heading" className="section-title">Appearance</h2>
           </div>
-          <div className="settings-body">
-            <fieldset className="choice">
-              <legend className="sr-only">Theme</legend>
-              {THEME_OPTIONS.map((option) => (
-                <label key={option} className="checkbox">
-                  <input type="radio" name="theme" checked={theme === option} onChange={() => setTheme(option)} />
-                  {option === "system" ? "Match the system" : option === "light" ? "Light" : "Dark"}
-                </label>
-              ))}
-            </fieldset>
-          </div>
+          <AppearanceSettings />
         </section>
       </div>
 

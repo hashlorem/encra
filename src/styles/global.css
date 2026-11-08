@@ -1,7 +1,13 @@
 /* Encra: Latent Print. Tokens and rules come from design.md; change both together. */
 
+/* Palettes. Latent Print is the default; the others are picked in Settings
+   and set as data-palette on the root. Every palette fills the same tokens,
+   and `npm run check:contrast` checks each one in both modes. A .swatch with
+   data-swatch shows one palette in a small sample without switching the app. */
+
 :root,
-:root[data-theme="light"] {
+:root[data-theme="light"],
+.swatch[data-swatch="latent"] {
   --paper: #f2f0ea;
   --paper-raised: #f8f7f3;
   --paper-sunken: #e5e1d7;
@@ -14,7 +20,8 @@
   color-scheme: light;
 }
 
-:root[data-theme="dark"] {
+:root[data-theme="dark"],
+:root[data-theme="dark"] .swatch[data-swatch="latent"] {
   --paper: #141413;
   --paper-raised: #1c1c1a;
   --paper-sunken: #2a2926;
@@ -25,6 +32,87 @@
   --link: #a9b9f2;
   --danger: #f0a39a;
   color-scheme: dark;
+}
+
+/* Darkroom: warm black under a safelight; by day, a contact sheet. */
+:root[data-palette="darkroom"],
+.swatch[data-swatch="darkroom"] {
+  --paper: #f4efe8;
+  --paper-raised: #faf7f2;
+  --paper-sunken: #e7dfd3;
+  --ink: #1d1715;
+  --ink-2: #3e3531;
+  --ink-3: #655a54;
+  --rule: #dcd2c4;
+  --link: #9a4a06;
+  --danger: #7e0e2a;
+}
+
+:root[data-palette="darkroom"][data-theme="dark"],
+:root[data-theme="dark"] .swatch[data-swatch="darkroom"] {
+  --paper: #120e0d;
+  --paper-raised: #1a1513;
+  --paper-sunken: #28201c;
+  --ink: #efe3d8;
+  --ink-2: #d2c2b4;
+  --ink-3: #a8968a;
+  --rule: #3a2f29;
+  --link: #f5b35a;
+  --danger: #e97da0;
+}
+
+/* Cyanotype: blueprint blue, with pale-gold links at night. */
+:root[data-palette="cyanotype"],
+.swatch[data-swatch="cyanotype"] {
+  --paper: #edf2f5;
+  --paper-raised: #f6f9fb;
+  --paper-sunken: #dce5ec;
+  --ink: #10213a;
+  --ink-2: #2e4058;
+  --ink-3: #4f6075;
+  --rule: #ccd8e2;
+  --link: #0a5ca8;
+  --danger: #a8261c;
+}
+
+:root[data-palette="cyanotype"][data-theme="dark"],
+:root[data-theme="dark"] .swatch[data-swatch="cyanotype"] {
+  --paper: #0d2137;
+  --paper-raised: #132a43;
+  --paper-sunken: #1b3653;
+  --ink: #eaf1f8;
+  --ink-2: #c8d5e3;
+  --ink-3: #a3b5c9;
+  --rule: #2b4763;
+  --link: #f2d27c;
+  --danger: #ff9f94;
+}
+
+/* Evidence bag: kraft paper and custody-form blue. */
+:root[data-palette="evidence"],
+.swatch[data-swatch="evidence"] {
+  --paper: #dccbab;
+  --paper-raised: #e6d8bd;
+  --paper-sunken: #cdb994;
+  --ink: #1c1711;
+  --ink-2: #3a3126;
+  --ink-3: #4e4335;
+  --rule: #bfaa84;
+  --link: #1d3c8f;
+  --danger: #8a1a12;
+}
+
+:root[data-palette="evidence"][data-theme="dark"],
+:root[data-theme="dark"] .swatch[data-swatch="evidence"] {
+  --paper: #1e1913;
+  --paper-raised: #26201a;
+  --paper-sunken: #332b22;
+  --ink: #efe5d3;
+  --ink-2: #d5c8b1;
+  --ink-3: #b2a38b;
+  --rule: #4a3f32;
+  --link: #afc6f2;
+  --danger: #f08c76;
 }
 
 :root {
@@ -191,19 +279,23 @@ kbd,
   mask-position: center;
 }
 
+/* --print-ratio is width over height, for sizing a print by the window's height. */
 .print-whorl {
+  --print-ratio: calc(617 / 791);
   -webkit-mask-image: url("../assets/prints/print-whorl.png");
   mask-image: url("../assets/prints/print-whorl.png");
   aspect-ratio: 617 / 791;
 }
 
 .print-loop {
+  --print-ratio: calc(151 / 192);
   -webkit-mask-image: url("../assets/prints/print-loop.png");
   mask-image: url("../assets/prints/print-loop.png");
   aspect-ratio: 151 / 192;
 }
 
 .print-arch {
+  --print-ratio: calc(443 / 552);
   -webkit-mask-image: url("../assets/prints/print-arch.png");
   mask-image: url("../assets/prints/print-arch.png");
   aspect-ratio: 443 / 552;
@@ -713,7 +805,7 @@ kbd,
 }
 
 .lock-art .print {
-  width: min(100%, calc((100vh - 180px) * 617 / 791));
+  width: min(100%, calc((100vh - 180px) * var(--print-ratio)));
   opacity: 0.92;
   transform: rotate(-6deg);
   transition: transform 200ms var(--ease), opacity 200ms var(--ease);
@@ -947,13 +1039,14 @@ kbd,
   gap: 24px;
 }
 
-.evidence-progress {
+/* A long job's progress: a line of text over a 2px bar. */
+.progress-line {
   display: flex;
   flex-direction: column;
   gap: 8px;
 }
 
-.evidence-progress progress {
+.progress-line progress {
   width: 100%;
   height: 2px;
   border: 0;
@@ -961,11 +1054,11 @@ kbd,
   background: var(--rule);
 }
 
-.evidence-progress progress::-webkit-progress-bar {
+.progress-line progress::-webkit-progress-bar {
   background: var(--rule);
 }
 
-.evidence-progress progress::-webkit-progress-value {
+.progress-line progress::-webkit-progress-value {
   background: var(--ink);
   transition: width var(--dur) var(--ease);
 }
@@ -1003,6 +1096,132 @@ kbd,
 
 .print-only {
   display: none;
+}
+
+/* ---------- Findings: check-up, indicators ---------- */
+
+/* Page-level actions under a list's title. */
+.list-tools {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 24px;
+  margin: -16px 0 -8px -4px;
+}
+
+.finding {
+  display: flex;
+  flex-direction: column;
+}
+
+.finding > .section-title {
+  margin-bottom: 8px;
+}
+
+.section-title.is-danger {
+  color: var(--danger);
+}
+
+/* One finding per line, on hairlines, with its action at the end. */
+.line-row {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 56px;
+  padding: 8px 0;
+  border-top: 1px solid var(--rule);
+}
+
+.finding > .line-row:last-child {
+  border-bottom: 1px solid var(--rule);
+}
+
+.line-row.is-nested {
+  padding-left: 24px;
+}
+
+.line-copy {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.indicators,
+.timeline {
+  display: flex;
+  flex-direction: column;
+  gap: 32px;
+}
+
+.indicators-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 24px;
+}
+
+.indicator-value {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 14px;
+  overflow-wrap: anywhere;
+}
+
+/* A long note wraps in its own column, so Copy stays at the end. */
+.indicator-note {
+  flex: 0 1 auto;
+  max-width: 45%;
+  text-align: right;
+}
+
+/* ---------- Import ---------- */
+
+.import-dialog {
+  width: min(560px, 100%);
+}
+
+.import-dialog h2:focus {
+  outline: none;
+}
+
+/* Counts on hairlines: label, then the number. */
+.tally {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  border-top: 1px solid var(--rule);
+  font-size: 14px;
+}
+
+.tally dt,
+.tally dd {
+  padding: 8px 0;
+  border-bottom: 1px solid var(--rule);
+}
+
+.tally dd {
+  padding-left: 16px;
+  text-align: right;
+}
+
+.sample {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 24px;
+  font-size: 14px;
+}
+
+.sample li {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-line {
+  padding: 12px 0;
+  border-top: 1px solid var(--rule);
+  border-bottom: 1px solid var(--rule);
+  font-size: 14px;
+  overflow-wrap: anywhere;
 }
 
 /* ---------- Tables (activity, ports) ---------- */
@@ -1165,6 +1384,179 @@ fieldset {
   gap: 8px 24px;
 }
 
+/* ---------- Appearance ---------- */
+
+.settings-body.is-wide {
+  max-width: 640px;
+}
+
+.appearance {
+  gap: 32px;
+}
+
+.appearance legend {
+  margin-bottom: 8px;
+}
+
+.appearance input[type="radio"] {
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin: 0;
+  accent-color: var(--ink);
+}
+
+.choice-copy {
+  display: flex;
+  flex: 1 1 200px;
+  flex-direction: column;
+  line-height: 1.35;
+}
+
+.is-current .choice-name {
+  font-weight: 600;
+}
+
+.theme-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 16px;
+  min-height: 72px;
+  margin: 0 -12px;
+  padding: 8px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+  transition: background-color var(--dur-fast) var(--ease);
+}
+
+.theme-row:hover,
+.theme-row.is-current {
+  background: var(--paper-sunken);
+}
+
+.theme-row .choice-name {
+  font-weight: 500;
+}
+
+.theme-row.is-current .choice-name {
+  font-weight: 600;
+}
+
+/* A palette's own colours, from its data-swatch tokens (see the top). */
+.swatch {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 12px;
+  width: 200px;
+  height: 52px;
+  padding: 0 16px;
+  border: 1px solid var(--rule);
+  background: var(--paper);
+  color: var(--ink);
+}
+
+.swatch .print {
+  width: calc(28px * var(--print-ratio));
+  height: 28px;
+}
+
+.swatch-type {
+  font: 400 20px/1 var(--serif);
+}
+
+.swatch-link,
+.swatch-danger {
+  font-size: 13px;
+  color: var(--link);
+}
+
+.swatch-danger {
+  color: var(--danger);
+}
+
+.print-choices {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 16px 40px;
+  margin-bottom: 8px;
+}
+
+.print-choice {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  cursor: pointer;
+}
+
+.print-choice .print {
+  width: calc(96px * var(--print-ratio));
+  height: 96px;
+  opacity: 0.55;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.print-choice:hover .print,
+.print-choice.is-current .print {
+  opacity: 1;
+}
+
+/* ---------- Compact density (Settings, Appearance) ----------
+   Rows drop from 56px to the contract's 40px floor for dense rows, and a
+   row's name and meta share one line. */
+
+:root[data-density="compact"] .row {
+  min-height: 40px;
+  padding: 2px 12px;
+}
+
+:root[data-density="compact"] .rows.is-virtual .row {
+  height: 40px;
+}
+
+/* One line per row. The name keeps its width; the username gets what's left. */
+:root[data-density="compact"] .row-copy {
+  flex: 1 1 auto;
+  flex-direction: row;
+  align-items: baseline;
+  gap: 0 10px;
+}
+
+:root[data-density="compact"] .row-name {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+:root[data-density="compact"] .row-copy > .meta {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:root[data-density="compact"] .facts dt,
+:root[data-density="compact"] .facts dd,
+:root[data-density="compact"] .line-row {
+  min-height: 40px;
+  padding-top: 4px;
+  padding-bottom: 4px;
+}
+
+:root[data-density="compact"] .entries > li {
+  padding: 16px 0;
+}
+
+:root[data-density="compact"] .table td {
+  padding: 8px 16px 8px 0;
+}
+
+:root[data-density="compact"] .tool-row {
+  padding: 16px 0;
+}
+
 /* ---------- Dialog ---------- */
 
 .dialog-backdrop {
@@ -1191,6 +1583,125 @@ fieldset {
 
 .dialog h2 {
   font: 400 28px/1.15 var(--serif);
+}
+
+/* ---------- ⌘K palette ---------- */
+
+.dialog-backdrop.is-top {
+  place-items: start center;
+  padding-top: min(120px, 12vh);
+}
+
+.palette {
+  display: flex;
+  flex-direction: column;
+  width: min(620px, 100%);
+  max-height: calc(100vh - min(120px, 12vh) - 48px);
+  border: 1px solid var(--rule);
+  background: var(--paper-raised);
+}
+
+.palette-search {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 4px 20px;
+  border-bottom: 1.5px solid var(--ink);
+}
+
+.palette-search .input {
+  flex: 1;
+  min-height: 56px;
+  border-bottom: 0;
+  font-size: 20px;
+}
+
+.palette-results {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 8px 8px 12px;
+}
+
+.palette-group {
+  padding: 12px 12px 4px;
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.palette-empty {
+  padding: 16px 12px;
+}
+
+.palette-option {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-height: 52px;
+  padding: 4px 12px;
+  border-radius: 2px;
+  cursor: pointer;
+}
+
+.palette-option.is-short {
+  min-height: 44px;
+}
+
+.palette-option[aria-selected="true"] {
+  background: var(--paper-sunken);
+}
+
+.palette-copy {
+  display: flex;
+  flex: 1;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.3;
+}
+
+.palette-title,
+.palette-sub {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.palette-title {
+  font-weight: 500;
+}
+
+.palette-option[aria-selected="true"] .palette-title {
+  font-weight: 600;
+}
+
+.palette-sub {
+  font-size: 13px;
+  color: var(--ink-3);
+}
+
+.palette-match {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.palette-keys {
+  display: flex;
+  flex: none;
+  gap: 16px;
+  font: 400 13px/1 var(--mono);
+  color: var(--ink-3);
+}
+
+.palette-foot {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding: 12px 20px;
+  border-top: 1px solid var(--rule);
+  font-size: 13px;
+  color: var(--ink-3);
 }
 
 /* ---------- Motion ----------
@@ -1240,7 +1751,8 @@ fieldset {
 .lock-art .print { animation: ink-in 700ms var(--ease) backwards; }
 .setup-watermark { animation: fade 900ms var(--ease) backwards; }
 .dialog-backdrop { animation: fade var(--dur) var(--ease) backwards; }
-.dialog { animation: pop var(--dur-slow) var(--ease) backwards; }
+.dialog,
+.palette { animation: pop var(--dur-slow) var(--ease) backwards; }
 
 /* Controls */
 .btn,
@@ -1293,7 +1805,8 @@ fieldset {
 .textarea,
 .input-row,
 .search,
-.composer-line {
+.composer-line,
+.palette-search {
   background: linear-gradient(var(--link), var(--link)) left bottom / 0% 2px no-repeat;
   transition: background-size var(--dur) var(--ease);
 }
@@ -1307,13 +1820,15 @@ fieldset {
 
 .input-row:focus-within,
 .search:focus-within,
-.composer-line:focus-within {
+.composer-line:focus-within,
+.palette-search:focus-within {
   background-size: 100% 2px;
 }
 
 .input-row .input,
 .search .input,
-.composer-line .input {
+.composer-line .input,
+.palette-search .input {
   background: none;
 }
 

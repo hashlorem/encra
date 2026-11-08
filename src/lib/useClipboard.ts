@@ -4,10 +4,10 @@ import { invoke } from "@tauri-apps/api/core";
 export type CopyField = "username" | "password" | "url" | "totp";
 
 /**
- * Every copy goes through Rust, which writes the clipboard (marked concealed
- * on macOS), wipes it after 30 seconds if it still holds the copied value, and
- * wipes it on lock. Vault fields are copied by id, so the secret never passes
- * through the webview.
+ * Every copy goes through Rust. Secrets are marked concealed on macOS, wiped
+ * after 30 seconds if the clipboard still holds them, and wiped on lock.
+ * Vault fields are copied by id, so the secret never passes through the
+ * webview.
  */
 export function useClipboard(feedbackMs = 1500) {
   const [copiedId, setCopiedId] = useState<string | null>(null);
@@ -47,5 +47,18 @@ export function useClipboard(feedbackMs = 1500) {
     [flash],
   );
 
-  return { copyField, copyText, copiedId };
+  /**
+   * Copy something Rust looks up itself, such as a case's indicator or a
+   * file's hash. Those aren't secrets, so they stay on the clipboard for a
+   * report instead of being wiped at 30 seconds.
+   */
+  const copyVia = useCallback(
+    async (command: string, args: Record<string, unknown>, id: string): Promise<void> => {
+      await invoke(command, args);
+      flash(id);
+    },
+    [flash],
+  );
+
+  return { copyField, copyText, copyVia, copiedId };
 }

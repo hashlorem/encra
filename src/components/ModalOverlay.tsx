@@ -6,6 +6,8 @@ interface ModalOverlayProps {
   onClose: () => void;
   /** id of the element that names this dialog, for screen readers. */
   labelledBy?: string;
+  /** Extra class on the backdrop, such as "is-top" to sit near the top. */
+  className?: string;
 }
 
 const FOCUSABLE_SELECTOR = [
@@ -24,7 +26,7 @@ const FOCUSABLE_SELECTOR = [
  * Previously focus was never moved into the dialog, never contained, and never
  * restored, and the dialog had no `role` or `aria-modal` at all.
  */
-export function ModalOverlay({ children, onClose, labelledBy }: ModalOverlayProps) {
+export function ModalOverlay({ children, onClose, labelledBy, className }: ModalOverlayProps) {
   const overlayRef = useRef<HTMLDivElement>(null);
   // Kept in a ref so the effect does not re-subscribe on every render. Callers
   // pass inline arrow functions, so an effect keyed on `onClose` would tear down
@@ -83,7 +85,7 @@ export function ModalOverlay({ children, onClose, labelledBy }: ModalOverlayProp
 
   return createPortal(
     <div
-      className="dialog-backdrop"
+      className={className ? `dialog-backdrop ${className}` : "dialog-backdrop"}
       ref={overlayRef}
       role="dialog"
       aria-modal="true"

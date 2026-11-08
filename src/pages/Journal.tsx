@@ -4,37 +4,31 @@ import { listen } from "@tauri-apps/api/event";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
+import { CaseIndicators } from "../components/CaseIndicators";
+import { CaseTimeline } from "../components/CaseTimeline";
 import { EvidencePanel } from "../components/EvidencePanel";
+import { KINDS, SEVERITIES, STATUS_LABELS, isLoud, kindLabel } from "../lib/cases";
 import { describeError } from "../lib/errors";
 import { formatDate, formatShortDate, formatTime, parseStored } from "../lib/format";
-import type { EntryInput, JournalEntry, Project, ProjectInput } from "../lib/types";
+import { useRequest, type Requested } from "../lib/navigation";
+import type { EntryInput, EvidenceItem, JournalEntry, Project, ProjectInput } from "../lib/types";
 
-const KINDS: { value: string; label: string }[] = [
-  { value: "note", label: "Note" },
-  { value: "finding", label: "Finding" },
-  { value: "recon", label: "Recon" },
-  { value: "exploitation", label: "Exploitation" },
-  { value: "post_exploit", label: "Post-exploitation" },
-  { value: "remediation", label: "Remediation" },
+type Tab = "notes" | "evidence" | "indicators" | "timeline";
+
+const TABS: { id: Tab; label: string }[] = [
+  { id: "notes", label: "Notes" },
+  { id: "evidence", label: "Evidence" },
+  { id: "indicators", label: "Indicators" },
+  { id: "timeline", label: "Timeline" },
 ];
-const SEVERITIES = ["info", "low", "medium", "high", "critical"] as const;
-const STATUS_LABELS: Record<string, string> = {
-  planning: "Planning",
-  in_progress: "In progress",
-  completed: "Closed",
-};
 
 const EMPTY_PROJECT: ProjectInput = { name: "", description: "", target: "", methodology: "" };
 const EMPTY_ENTRY: Omit<EntryInput, "project_id"> = { title: "", content: "", entry_type: "note", severity: "info" };
 
-function kindLabel(value: string): string {
-  return KINDS.find((kind) => kind.value === value)?.label ?? value;
-}
-
 /** "Finding, high" with only high and critical in the danger colour. */
 function EntryKind({ entry }: { entry: JournalEntry }) {
   const showSeverity = entry.severity && entry.severity !== "info";
-  const loud = entry.severity === "high" || entry.severity === "critical";
+  const loud = isLoud(entry.severity);
   return (
     <span className="meta">
       {kindLabel(entry.entry_type)}
@@ -47,7 +41,7 @@ function EntryKind({ entry }: { entry: JournalEntry }) {
   );
 }
 
-function Journal() {
+function Journal({ requested }: { requested?: Requested | null }) {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [entries, setEntries] = useState<JournalEntry[]>([]);
@@ -66,7 +60,7 @@ function Journal() {
   const [pendingDeleteEntry, setPendingDeleteEntry] = useState<JournalEntry | null>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const [tab, setTab] = useState<"notes" | "evidence">("notes");
+  const [tab, setTab] = useState<Tab>("notes");
   const [evidenceCount, setEvidenceCount] = useState<number | null>(null);
   const [dropToken, setDropToken] = useState(0);
 
@@ -124,9 +118,26 @@ function Journal() {
   useEffect(() => {
     setEntryForm(EMPTY_ENTRY);
     setEvidenceCount(null);
-    if (selectedId) void loadEntries(selectedId);
-    else setEntries([]);
+    if (!selectedId) {
+      setEntries([]);
+      return;
+    }
+    void loadEntries(selectedId);
+    // For the case's meta line and the indicator count, before the Evidence
+    // tab is ever opened.
+    let current = true;
+    invoke<EvidenceItem[]>("list_evidence", { projectId: selectedId })
+      .then((items) => current && setEvidenceCount(items.length))
+      .catch(() => undefined);
+    return () => {
+      current = false;
+    };
   }, [selectedId, loadEntries]);
+
+  useRequest(requested, (request) => {
+    if (request.kind === "case") setSelectedId(request.id);
+    else if (request.kind === "new-case") setShowProjectForm(true);
+  });
 
   const project = useMemo(() => projects.find((p) => p.id === selectedId) ?? null, [projects, selectedId]);
 
@@ -252,13 +263,15 @@ function Journal() {
             </header>
 
             <div className="case-tabs no-print" role="tablist" aria-label="Case sections">
-              <button role="tab" aria-selected={tab === "notes"} onClick={() => setTab("notes")}>Notes</button>
-              <button role="tab" aria-selected={tab === "evidence"} onClick={() => setTab("evidence")}>Evidence</button>
+              {TABS.map(({ id, label }) => (
+                <button key={id} role="tab" aria-selected={tab === id} onClick={() => setTab(id)}>{label}</button>
+              ))}
             </div>
 
-            {tab === "evidence" ? (
-              <EvidencePanel projectId={project.id} dropToken={dropToken} onCount={setEvidenceCount} />
-            ) : (
+            {tab === "evidence" && <EvidencePanel projectId={project.id} dropToken={dropToken} onCount={setEvidenceCount} />}
+            {tab === "indicators" && <CaseIndicators projectId={project.id} entries={entries.length} files={evidenceCount ?? 0} />}
+            {tab === "timeline" && <CaseTimeline projectId={project.id} />}
+            {tab === "notes" && (
               <>
               <form
                 className="composer"

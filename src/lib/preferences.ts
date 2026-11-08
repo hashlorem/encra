@@ -1,5 +1,8 @@
 export const PREFERENCE_KEYS = {
   theme: "encra-theme",
+  palette: "encra-palette",
+  density: "encra-density",
+  lockPrint: "encra-lock-print",
   lockKeybind: "encra-lock-keybind",
   autoLockBlur: "encra-autolock-blur",
   sound: "encra-sound",

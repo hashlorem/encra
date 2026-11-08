@@ -14,11 +14,11 @@ const CATEGORIES = [
 
 const EMPTY_FORM: KBInput = { title: "", command: "", description: "", tags: "", category: "general" };
 
-function CommandKB({ onClose }: { onClose: () => void }) {
+function CommandKB({ onClose, initialSearch = "" }: { onClose: () => void; initialSearch?: string }) {
   const [entries, setEntries] = useState<KBEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
-  const [search, setSearch] = useState("");
+  const [search, setSearch] = useState(initialSearch);
   const [catFilter, setCatFilter] = useState("all");
   const [showForm, setShowForm] = useState(false);
   const [form, setForm] = useState<KBInput>(EMPTY_FORM);

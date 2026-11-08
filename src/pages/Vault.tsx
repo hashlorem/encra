@@ -1,5 +1,8 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
+import { CheckupView } from "../components/CheckupView";
+import { ImportDialog } from "../components/ImportDialog";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
@@ -7,6 +10,7 @@ import { VirtualList } from "../components/VirtualList";
 import { Print } from "../components/Print";
 import { describeError } from "../lib/errors";
 import { formatDate } from "../lib/format";
+import { useRequest, type Requested } from "../lib/navigation";
 import { useClipboard, type CopyField } from "../lib/useClipboard";
 import {
   setTotpRolloverHandler,
@@ -15,9 +19,12 @@ import {
   useTotpRemaining,
 } from "../lib/totpWindow";
 import type {
+  CheckProgress,
+  Checkup,
   CredentialDetail,
   CredentialInput,
   CredentialSummary,
+  ImportPreview,
   TotpCode,
 } from "../lib/types";
 
@@ -43,7 +50,20 @@ const TotpCountdown = memo(function TotpCountdown() {
   return <span className="meta">{remaining} seconds left</span>;
 });
 
-function Vault() {
+/** The list's note for a login while the check-up shows: its worst finding. */
+function checkupNotes(checkup: Checkup): Map<string, string> {
+  const notes = new Map<string, string>();
+  const note = (id: string, text: string) => {
+    if (!notes.has(id)) notes.set(id, text);
+  };
+  checkup.breached.forEach(({ login }) => note(login.id, "in a breach"));
+  checkup.reused.flat().forEach((login) => note(login.id, "same password"));
+  checkup.weak.forEach((login) => note(login.id, "weak"));
+  checkup.old.forEach(({ login }) => note(login.id, "over a year old"));
+  return notes;
+}
+
+function Vault({ requested }: { requested?: Requested | null }) {
   const [credentials, setCredentials] = useState<CredentialSummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
@@ -64,7 +84,15 @@ function Vault() {
   const [totpSecret, setTotpSecret] = useState("");
   const [totpBusy, setTotpBusy] = useState(false);
   const [totpError, setTotpError] = useState("");
-  const qrFileRef = useRef<HTMLInputElement>(null);
+
+  // The main panel shows the open login, or the check-up.
+  const [view, setView] = useState<"record" | "checkup">("record");
+  const [checkup, setCheckup] = useState<Checkup | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [progress, setProgress] = useState<CheckProgress | null>(null);
+
+  const [importPreview, setImportPreview] = useState<ImportPreview | null>(null);
+  const [readingImport, setReadingImport] = useState(false);
 
   const [pendingDelete, setPendingDelete] = useState<CredentialDetail | null>(null);
   const [deleting, setDeleting] = useState(false);
@@ -154,6 +182,34 @@ function Vault() {
     return () => window.removeEventListener("encra:search-focus", handler);
   }, []);
 
+  useEffect(() => {
+    const stop = listen<CheckProgress>("checkup-progress", (event) => setProgress(event.payload));
+    return () => {
+      void stop.then((unlisten) => unlisten());
+    };
+  }, []);
+
+  const loadCheckup = useCallback(async () => {
+    try {
+      setCheckup(await invoke<Checkup>("vault_checkup"));
+    } catch (err) {
+      setError(describeError(err, "Couldn’t run the check-up."));
+    }
+  }, []);
+
+  const showCheckup = useCallback(() => {
+    setError("");
+    setView("checkup");
+    void loadCheckup();
+  }, [loadCheckup]);
+
+  /** Open a login from elsewhere (the check-up, the palette). */
+  const openLogin = useCallback((id: string) => {
+    setSearch("");
+    setView("record");
+    setSelectedId(id);
+  }, []);
+
   const filtered = useMemo(() => {
     const query = search.trim().toLowerCase();
     if (!query) return credentials;
@@ -185,6 +241,39 @@ function Vault() {
     }
   };
 
+  const checkAll = async () => {
+    if (checking) return;
+    setChecking(true);
+    setProgress(null);
+    setError("");
+    try {
+      await invoke<number>("check_all_breaches");
+    } catch (err) {
+      setError(describeError(err, "The breach check stopped part-way. Results so far are kept."));
+    } finally {
+      setChecking(false);
+      setProgress(null);
+      // Whatever finished is stored, so show it either way.
+      setBreaches({});
+      await Promise.all([loadCheckup(), loadList()]);
+    }
+  };
+
+  const startImport = async () => {
+    if (readingImport || importPreview) return;
+    setReadingImport(true);
+    setError("");
+    try {
+      // Rust opens the file dialog, reads and parses the export, and holds it.
+      const preview = await invoke<ImportPreview | null>("pick_import_file");
+      if (preview) setImportPreview(preview);
+    } catch (err) {
+      setError(describeError(err, "Couldn’t read that export."));
+    } finally {
+      setReadingImport(false);
+    }
+  };
+
   const checkBreach = async () => {
     const id = selectedId;
     if (!id) return;
@@ -203,13 +292,34 @@ function Vault() {
     setShowForm(true);
   };
 
-  const openEdit = () => {
-    if (!detail) return;
-    setEditing(detail);
+  const editRecord = (record: CredentialDetail) => {
+    setEditing(record);
     // A blank password means "keep the current one" on the backend.
-    setForm({ service: detail.service, username: detail.username, password: "", url: detail.url, notes: detail.notes });
+    setForm({ service: record.service, username: record.username, password: "", url: record.url, notes: record.notes });
     setShowForm(true);
   };
+
+  const openEdit = () => {
+    if (detail) editRecord(detail);
+  };
+
+  /** From the check-up's "Change": open the login and its edit form. */
+  const changeLogin = async (id: string) => {
+    try {
+      const record = await invoke<CredentialDetail>("get_credential", { id });
+      openLogin(id);
+      editRecord(record);
+    } catch (err) {
+      setError(describeError(err, "Could not open that login."));
+    }
+  };
+
+  useRequest(requested, (request) => {
+    if (request.kind === "login") openLogin(request.id);
+    else if (request.kind === "new-login") openNew();
+    else if (request.kind === "import") void startImport();
+    else if (request.kind === "checkup") showCheckup();
+  });
 
   const closeForm = () => {
     setShowForm(false);
@@ -260,15 +370,16 @@ function Vault() {
     }
   };
 
-  /** Add the code from a QR: on the clipboard, or in an image file. */
-  const readQr = async (file?: File) => {
+  /** Add the code from a QR: a screenshot on the clipboard, or an image file
+   * picked in a dialog Rust opens. Either way the image stays in Rust. */
+  const readQr = async (from: "clipboard" | "file") => {
     if (!selectedId || totpBusy) return;
     setTotpBusy(true);
     setTotpError("");
     try {
-      if (file) {
-        const bytes = new Uint8Array(await file.arrayBuffer());
-        await invoke("setup_totp_from_image", bytes, { headers: { "credential-id": selectedId } });
+      if (from === "file") {
+        const added = await invoke<boolean>("setup_totp_from_file", { credentialId: selectedId });
+        if (!added) return;
       } else {
         await invoke("setup_totp_from_clipboard", { credentialId: selectedId });
       }
@@ -313,6 +424,7 @@ function Vault() {
 
   const breach = selectedId ? breaches[selectedId] : undefined;
   const copied = (field: CopyField) => copiedId === `${selectedId}:${field}`;
+  const notes = useMemo(() => (view === "checkup" && checkup ? checkupNotes(checkup) : null), [view, checkup]);
 
   return (
     <div className="split">
@@ -320,6 +432,12 @@ function Vault() {
         <div className="split-list-head">
           <h1 className="title-l">Vault</h1>
           <button className="btn-outline" onClick={openNew}>New login</button>
+        </div>
+        <div className="list-tools">
+          <button className="btn-text" onClick={showCheckup}>Check-up</button>
+          <button className="btn-text" onClick={() => void startImport()} disabled={readingImport}>
+            {readingImport ? "Reading the export…" : "Import…"}
+          </button>
         </div>
         <label className="search">
           <span className="sr-only">Search logins</span>
@@ -330,7 +448,7 @@ function Vault() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
-          <kbd className="meta">⌘K</kbd>
+          <kbd className="meta">⌘F</kbd>
         </label>
 
         {loading && <p className="status" role="status">Opening the vault…</p>}
@@ -346,21 +464,19 @@ function Vault() {
             // This session's check if there was one, else the remembered one.
             const result = breaches[c.id];
             const breached = result ? result.state === "done" && result.count > 0 : c.breached;
+            const flag = notes?.get(c.id);
+            const note = flag ?? (breached ? "in a breach" : c.has_totp ? "2FA" : "");
             return (
               <button
                 className="row"
-                aria-current={c.id === selectedId ? "true" : undefined}
-                onClick={() => setSelectedId(c.id)}
+                aria-current={view === "record" && c.id === selectedId ? "true" : undefined}
+                onClick={() => openLogin(c.id)}
               >
                 <span className="row-copy">
                   <span className="row-name">{c.service}</span>
                   {c.username && <span className="meta">{c.username}</span>}
                 </span>
-                {breached ? (
-                  <span className="row-note is-danger">in a breach</span>
-                ) : (
-                  c.has_totp && <span className="row-note">2FA</span>
-                )}
+                {note && <span className={note === "in a breach" ? "row-note is-danger" : "row-note"}>{note}</span>}
               </button>
             );
           }}
@@ -370,7 +486,19 @@ function Vault() {
       <div className="split-main">
         {error && <p className="error" role="alert">{error}</p>}
 
-        {detail && (
+        {view === "checkup" && !checkup && <p className="status" role="status">Running the check-up…</p>}
+        {view === "checkup" && checkup && (
+          <CheckupView
+            checkup={checkup}
+            progress={progress}
+            checking={checking}
+            onCheckAll={() => void checkAll()}
+            onOpen={openLogin}
+            onChange={(id) => void changeLogin(id)}
+          />
+        )}
+
+        {view === "record" && detail && (
           <article key={detail.id} className="record stagger" aria-labelledby="record-title">
             <Print kind="arch" className="record-watermark" />
             <header className="record-head">
@@ -551,21 +679,15 @@ function Vault() {
                   // A screenshot on the clipboard has no text: read it as a QR.
                   if (!event.clipboardData.getData("text")) {
                     event.preventDefault();
-                    void readQr();
+                    void readQr("clipboard");
                   }
                 }} />
             </div>
             <div className="field">
               <span className="label">Or the QR code</span>
               <div className="actions">
-                <button className="btn-outline" type="button" onClick={() => void readQr()} disabled={totpBusy}>Paste screenshot</button>
-                <button className="btn-text" type="button" onClick={() => qrFileRef.current?.click()} disabled={totpBusy}>Choose image…</button>
-                <input ref={qrFileRef} type="file" accept="image/png,image/jpeg" hidden
-                  onChange={(event) => {
-                    const file = event.target.files?.[0];
-                    event.target.value = "";
-                    if (file) void readQr(file);
-                  }} />
+                <button className="btn-outline" type="button" onClick={() => void readQr("clipboard")} disabled={totpBusy}>Paste screenshot</button>
+                <button className="btn-text" type="button" onClick={() => void readQr("file")} disabled={totpBusy}>Choose image…</button>
               </div>
               <span className="meta">⌃⇧⌘4 copies a screenshot. Delete any saved screenshot of the QR afterwards.</span>
             </div>
@@ -576,6 +698,21 @@ function Vault() {
             </div>
           </form>
         </ModalOverlay>
+      )}
+
+      {importPreview && (
+        <ImportDialog
+          preview={importPreview}
+          onClose={() => setImportPreview(null)}
+          onImported={() => {
+            void loadList();
+            if (view === "checkup") void loadCheckup();
+          }}
+          onCheckup={() => {
+            setImportPreview(null);
+            showCheckup();
+          }}
+        />
       )}
 
       {pendingDelete && (

@@ -26,6 +26,10 @@ const ACTION_LABELS: Record<string, string> = {
   evidence_deleted: "Evidence removed",
   backup_export: "Backup exported",
   backup_import: "Backup restored",
+  import: "Logins imported",
+  import_file_deleted: "Export deleted",
+  breach_check_all: "Breach check",
+  indicators_exported: "Indicators exported",
   recovery: "Recovery code used",
   migration: "Vault migrated",
 };
