@@ -367,6 +367,7 @@ pub(crate) fn seal_detail(reason: Option<&str>) -> &'static str {
         Some("shortcut") => "sealed with the keyboard shortcut",
         Some("idle") => "sealed after 5 idle minutes",
         Some("app_switch") => "sealed when Encra lost focus",
+        Some("palette") => "sealed from the ⌘K palette",
         _ => "vault locked",
     }
 }

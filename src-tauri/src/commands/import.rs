@@ -91,6 +91,9 @@ pub(crate) struct SampleLogin {
 pub(crate) struct ImportPreview {
     token: String,
     file_name: String,
+    /// Where the file is, with the home folder shortened to ~, so the person
+    /// knows which file "Delete the export" means.
+    location: String,
     source: &'static str,
     ready: usize,
     with_totp: usize,
@@ -99,10 +102,19 @@ pub(crate) struct ImportPreview {
     sample: Vec<SampleLogin>,
 }
 
-pub(crate) fn preview(token: String, file_name: String, parsed: &import::Parsed) -> ImportPreview {
+/// `path` with the home folder shown as ~.
+pub(crate) fn display_path(path: &std::path::Path, home: Option<&std::path::Path>) -> String {
+    match home.and_then(|home| path.strip_prefix(home).ok()) {
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.display().to_string(),
+    }
+}
+
+pub(crate) fn preview(token: String, path: &std::path::Path, home: Option<&std::path::Path>, parsed: &import::Parsed) -> ImportPreview {
     ImportPreview {
         token,
-        file_name,
+        file_name: file_name(path),
+        location: display_path(path, home),
         source: parsed.format.label(),
         ready: parsed.logins.len(),
         with_totp: parsed.logins.iter().filter(|l| l.totp.is_some()).count(),
@@ -136,7 +148,8 @@ pub(crate) async fn pick_import_file(app: tauri::AppHandle) -> Result<Option<Imp
         let db = require_db(&state)?;
         import::drop_duplicates(&db, &key, &mut parsed)?;
     }
-    let mut shown = preview(String::new(), file_name(&path), &parsed);
+    let home = app.path().home_dir().ok();
+    let mut shown = preview(String::new(), &path, home.as_deref(), &parsed);
     shown.token = app.state::<PendingImport>().stage(path, parsed)?;
     Ok(Some(shown))
 }
@@ -205,10 +218,20 @@ mod tests {
     }
 
     #[test]
+    fn test_display_path_shortens_only_the_home_folder() {
+        let home = std::path::Path::new("/Users/someone");
+        assert_eq!(display_path(std::path::Path::new("/Users/someone/Downloads/a.csv"), Some(home)), "~/Downloads/a.csv");
+        assert_eq!(display_path(std::path::Path::new("/Users/someone-else/a.csv"), Some(home)), "/Users/someone-else/a.csv");
+        assert_eq!(display_path(std::path::Path::new("/Volumes/USB/a.csv"), None), "/Volumes/USB/a.csv");
+    }
+
+    #[test]
     fn test_the_preview_carries_names_and_counts_but_no_secrets() {
         let parsed = import::parse(CSV).unwrap();
-        let json = serde_json::to_string(&preview("t".into(), "Passwords.csv".into(), &parsed)).unwrap();
+        let home = std::path::Path::new("/Users/someone");
+        let json = serde_json::to_string(&preview("t".into(), &home.join("Downloads/Passwords.csv"), Some(home), &parsed)).unwrap();
         assert!(json.contains("GitHub") && json.contains("hashlorem"));
+        assert!(json.contains("\"location\":\"~/Downloads/Passwords.csv\"") && json.contains("\"file_name\":\"Passwords.csv\""));
         assert!(!json.contains("gh-secret-pass"), "no password");
         assert!(!json.contains("JBSWY3DPEHPK3PXP"), "no 2FA key");
         assert!(json.contains("\"with_totp\":1"));

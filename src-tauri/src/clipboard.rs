@@ -21,7 +21,12 @@ use crate::util::constant_time_eq;
 pub const CLEAR_AFTER: Duration = Duration::from_secs(30);
 
 pub trait ClipboardBackend: Send + Sync {
+    /// Write a secret: hidden from clipboard history where the OS allows.
     fn write(&self, text: &str) -> Result<(), String>;
+    /// Write ordinary text that clipboard history may keep.
+    fn write_plain(&self, text: &str) -> Result<(), String> {
+        self.write(text)
+    }
     /// The current clipboard text, or `None` if it holds no text.
     fn read(&self) -> Option<String>;
     fn clear(&self) -> Result<(), String>;
@@ -43,6 +48,10 @@ impl ClipboardBackend for SystemClipboard {
         {
             clipboard.set_text(text).map_err(|e| e.to_string())
         }
+    }
+
+    fn write_plain(&self, text: &str) -> Result<(), String> {
+        arboard::Clipboard::new().and_then(|mut clipboard| clipboard.set_text(text)).map_err(|e| e.to_string())
     }
 
     fn read(&self) -> Option<String> {
@@ -96,6 +105,16 @@ impl ClipboardGuard {
             guard.wipe_if_current(Some(generation));
         });
         Ok(())
+    }
+
+    /// Write text that isn't a secret (an indicator, a file hash) the ordinary
+    /// way: no wipe, and clipboard history may keep it, since it is meant to
+    /// be pasted into reports. Only Rust decides what goes this way: commands
+    /// look the text up themselves and never take it from the page. A wipe
+    /// still owed for an earlier secret leaves it alone, because the
+    /// clipboard no longer holds that secret.
+    pub fn copy_plain(&self, text: &str) -> Result<(), String> {
+        self.backend.write_plain(text)
     }
 
     /// Wipe now if a copied value is still owed a wipe. Called on every lock.
@@ -190,6 +209,17 @@ pub mod tests {
         *fake.0.lock().unwrap() = Some("later".into());
         assert!(!guard.wipe_now());
         assert_eq!(contents(&fake).as_deref(), Some("later"));
+    }
+
+    #[test]
+    fn test_a_plain_copy_outlives_the_wipe_owed_to_an_earlier_secret() {
+        let (guard, fake) = guard(Duration::from_millis(30));
+        guard.copy("s3cret-value").unwrap();
+        guard.copy_plain("203.0.113[.]45").unwrap();
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(contents(&fake).as_deref(), Some("203.0.113[.]45"), "the timer only clears its own value");
+        assert!(!guard.wipe_now(), "sealing leaves it too");
+        assert_eq!(contents(&fake).as_deref(), Some("203.0.113[.]45"));
     }
 
     #[test]

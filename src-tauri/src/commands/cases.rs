@@ -2,9 +2,12 @@
 //! and evidence.
 
 use std::path::Path;
+use std::sync::Arc;
 
 use rusqlite::Connection;
 use tauri::Manager;
+
+use crate::clipboard::ClipboardGuard;
 
 use crate::commands::evidence::EvidenceDir;
 use crate::commands::files::{file_name, write_private};
@@ -232,6 +235,40 @@ pub(crate) fn case_indicators(state: tauri::State<AppState>, dir: tauri::State<E
     let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
     Ok(indicators::extract(&case_sources(&db, &key, &dir.0, &project_id)?))
+}
+
+/// What copying a case's indicators puts on the clipboard: the one whose value
+/// is `value`, or all of them, one per line. Empty if `value` isn't one.
+pub(crate) fn indicator_lines(found: &[indicators::Indicator], defanged: bool, value: Option<&str>) -> Vec<String> {
+    found
+        .iter()
+        .filter(|indicator| value.is_none_or(|value| indicator.value == value))
+        .map(|indicator| if defanged { indicator.defanged.clone() } else { indicator.value.clone() })
+        .collect()
+}
+
+/// Copy one of a case's indicators, named by its value, or all of them. Rust
+/// finds them again instead of taking text from the page, so nothing but this
+/// case's indicators can leave this way. They stay on the clipboard, since
+/// they are meant for reports and searches.
+#[tauri::command]
+pub(crate) fn copy_indicators(
+    state: tauri::State<AppState>,
+    clipboard: tauri::State<Arc<ClipboardGuard>>,
+    dir: tauri::State<EvidenceDir>,
+    project_id: String,
+    defanged: bool,
+    value: Option<String>,
+) -> Result<usize, String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    let found = indicators::extract(&case_sources(&db, &key, &dir.0, &project_id)?);
+    let lines = indicator_lines(&found, defanged, value.as_deref());
+    if lines.is_empty() {
+        return Err("that indicator is no longer in this case".into());
+    }
+    clipboard.copy_plain(&lines.join("\n"))?;
+    Ok(lines.len())
 }
 
 /// Save a case's indicators as CSV where the person chooses, through a save

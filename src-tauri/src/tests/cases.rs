@@ -111,6 +111,14 @@ fn test_case_indicators_and_timeline_draw_on_notes_and_evidence() {
     assert_eq!(domain.sources, ["Header analysis", "Gateway log"], "oldest note first");
     assert!(!found.iter().any(|i| i.value.contains("invoice.pdf")), "the file name is not a domain");
 
+    // Copying names an indicator by value; only this case's indicators come
+    // back, so the page can't use it to put other text on the clipboard.
+    use crate::commands::cases::indicator_lines;
+    assert_eq!(indicator_lines(&found, true, Some("203.0.113.45")), ["203[.]0[.]113[.]45"]);
+    assert_eq!(indicator_lines(&found, false, Some("203.0.113.45")), ["203.0.113.45"]);
+    assert!(indicator_lines(&found, true, Some("a-long-master-password")).is_empty(), "anything else copies nothing");
+    assert_eq!(indicator_lines(&found, false, None).len(), found.len(), "all of them, one per line");
+
     let events = timeline(&conn, &dek, &evidence_dir, "case").unwrap();
     let order: Vec<(&str, &str)> = events.iter().map(|e| (e.source, e.title.as_str())).collect();
     assert_eq!(order[..3], [("case", "Phishing, finance mailbox"), ("entry", "Header analysis"), ("entry", "Gateway log")]);

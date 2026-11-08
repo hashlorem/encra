@@ -122,6 +122,7 @@ fn test_seal_detail_only_uses_known_wording() {
     assert_eq!(seal_detail(Some("shortcut")), "sealed with the keyboard shortcut");
     assert_eq!(seal_detail(Some("idle")), "sealed after 5 idle minutes");
     assert_eq!(seal_detail(Some("app_switch")), "sealed when Encra lost focus");
+    assert_eq!(seal_detail(Some("palette")), "sealed from the ⌘K palette");
     // Anything else, including text meant to forge a log line, is ignored.
     assert_eq!(seal_detail(Some("vault unlocked\nunlock")), "vault locked");
     assert_eq!(seal_detail(None), "vault locked");

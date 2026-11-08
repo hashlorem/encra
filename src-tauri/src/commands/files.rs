@@ -10,6 +10,7 @@ use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
 use tauri::{Emitter, Manager};
+use zeroize::Zeroize;
 
 /// Files dropped on the window. The page showing claims them shortly after
 /// the drop (Evidence or the Nmap parser), or they are forgotten.
@@ -56,9 +57,9 @@ pub(crate) fn file_name(path: &Path) -> String {
     path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default()
 }
 
-/// Read a whole text file, refusing one larger than `max` bytes before
-/// reading any of it.
-pub(crate) fn read_text_capped(path: &Path, max: u64) -> Result<String, String> {
+/// Read a whole file, refusing one larger than `max` bytes before reading any
+/// of it.
+pub(crate) fn read_capped(path: &Path, max: u64) -> Result<Vec<u8>, String> {
     let file = std::fs::File::open(path).map_err(|e| format!("could not open that file: {e}"))?;
     let meta = file.metadata().map_err(|e| format!("could not open that file: {e}"))?;
     if !meta.is_file() {
@@ -67,13 +68,23 @@ pub(crate) fn read_text_capped(path: &Path, max: u64) -> Result<String, String> 
     if meta.len() > max {
         return Err(format!("that file is too large ({} bytes, the limit is {max})", meta.len()));
     }
-    let mut text = String::with_capacity(meta.len() as usize);
+    let mut bytes = Vec::with_capacity(meta.len() as usize);
     // The size can change after the check; never read past the limit.
-    file.take(max + 1).read_to_string(&mut text).map_err(|e| format!("could not read that file: {e}"))?;
-    if text.len() as u64 > max {
+    file.take(max + 1).read_to_end(&mut bytes).map_err(|e| format!("could not read that file: {e}"))?;
+    if bytes.len() as u64 > max {
+        bytes.zeroize();
         return Err(format!("that file is too large (the limit is {max} bytes)"));
     }
-    Ok(text)
+    Ok(bytes)
+}
+
+/// The same for a text file, which must be UTF-8.
+pub(crate) fn read_text_capped(path: &Path, max: u64) -> Result<String, String> {
+    String::from_utf8(read_capped(path, max)?).map_err(|e| {
+        // It may still be a password export in another encoding.
+        e.into_bytes().zeroize();
+        "could not read that file: it isn't UTF-8 text".to_string()
+    })
 }
 
 /// Write `contents` to `dest`, readable by this user only, through a hidden
@@ -123,6 +134,13 @@ mod tests {
 
         assert!(read_text_capped(&dir.join("missing.xml"), 64).unwrap_err().contains("could not open"));
         assert!(read_text_capped(&dir, 64).is_err(), "a folder is not a file");
+
+        // Exactly at the limit is fine; text has to be UTF-8, bytes don't.
+        let latin1 = dir.join("export.csv");
+        std::fs::write(&latin1, b"name,password\ncaf\xe9,x\n").unwrap();
+        assert_eq!(read_capped(&latin1, 21).unwrap().len(), 21);
+        assert!(read_capped(&latin1, 20).unwrap_err().contains("too large"));
+        assert!(read_text_capped(&latin1, 64).unwrap_err().starts_with("could not read that file"));
         std::fs::remove_dir_all(dir).unwrap();
     }
 

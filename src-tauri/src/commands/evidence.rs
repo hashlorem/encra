@@ -79,6 +79,27 @@ pub(crate) async fn add_dropped_evidence(app: tauri::AppHandle, project_id: Stri
     add_evidence_files(app, project_id, paths, note).await
 }
 
+/// Copy one of a file's hashes ("sha256", "sha1" or "md5"), read from its
+/// record here: the page names the hash, it never supplies the text.
+#[tauri::command]
+pub(crate) fn copy_evidence_hash(
+    state: tauri::State<AppState>,
+    clipboard: tauri::State<std::sync::Arc<crate::clipboard::ClipboardGuard>>,
+    id: String,
+    algorithm: String,
+) -> Result<(), String> {
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    let hashes = evidence::load(&db, &key, &id)?.hashes;
+    let hash = match algorithm.as_str() {
+        "sha256" => hashes.sha256,
+        "sha1" => hashes.sha1,
+        "md5" => hashes.md5,
+        _ => return Err("unknown hash".into()),
+    };
+    clipboard.copy_plain(&hash)
+}
+
 #[tauri::command]
 pub(crate) async fn verify_evidence(app: tauri::AppHandle, id: String) -> Result<evidence::Check, String> {
     let state = app.state::<AppState>();

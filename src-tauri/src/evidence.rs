@@ -430,7 +430,8 @@ fn row_to_item(dek: &[u8; 32], dir: Option<&Path>, row: &rusqlite::Row) -> rusql
 
 const ITEM_COLUMNS: &str = "id, project_id, name, source, size, sha256, sha1, md5, added_at";
 
-fn load(db: &Connection, dek: &[u8; 32], item_id: &str) -> Result<Item, String> {
+/// One evidence record, without touching its file.
+pub fn load(db: &Connection, dek: &[u8; 32], item_id: &str) -> Result<Item, String> {
     db.query_row(&format!("SELECT {ITEM_COLUMNS} FROM evidence_items WHERE id = ?1"), [item_id], |row| row_to_item(dek, None, row))
         .optional()
         .map_err(|e| e.to_string())?

@@ -5,6 +5,7 @@ use rusqlite::Connection;
 use zeroize::Zeroize;
 
 use crate::clipboard::ClipboardGuard;
+use crate::commands::files::read_capped;
 use crate::credentials::{self, CopyField, CredentialDetail, CredentialSummary, TotpCode};
 use crate::db::*;
 use crate::util::{check_field, uuid_v4};
@@ -191,18 +192,30 @@ pub(crate) async fn setup_totp_from_clipboard(state: tauri::State<'_, AppState>,
     Ok(())
 }
 
-/// An image file the person chose, sent as raw bytes with the login's id in
-/// a header.
+/// An image of the QR, picked with the system dialog and read here, so the
+/// image (and the key in it) never passes through the page. False if the
+/// dialog is cancelled.
 #[tauri::command]
-pub(crate) async fn setup_totp_from_image(state: tauri::State<'_, AppState>, request: tauri::ipc::Request<'_>) -> Result<(), String> {
-    let key = require_unlocked(&state)?;
-    let credential_id = request.headers().get("credential-id").and_then(|v| v.to_str().ok()).ok_or("missing login id")?.to_string();
-    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else {
-        return Err("expected image bytes".into());
+pub(crate) async fn setup_totp_from_file(app: tauri::AppHandle, credential_id: String) -> Result<bool, String> {
+    use tauri::Manager;
+    use tauri_plugin_dialog::DialogExt;
+    require_unlocked(&app.state::<AppState>())?;
+    let Some(picked) = app.dialog().file().set_title("Choose the QR image").add_filter("Image", &["png", "jpg", "jpeg"]).blocking_pick_file() else {
+        return Ok(false);
     };
-    let config = totp::Config::parse(&qr::read_code_link(&qr::from_encoded(bytes)?)?)?;
+    let path = picked.into_path().map_err(|e| e.to_string())?;
+    let config = tauri::async_runtime::spawn_blocking(move || -> Result<totp::Config, String> {
+        let bytes = zeroize::Zeroizing::new(read_capped(&path, qr::MAX_IMAGE_BYTES as u64)?);
+        let link = zeroize::Zeroizing::new(qr::read_code_link(&qr::from_encoded(&bytes)?)?);
+        totp::Config::parse(&link)
+    })
+    .await
+    .map_err(|e| e.to_string())??;
+    let state = app.state::<AppState>();
+    let key = require_unlocked(&state)?;
     let db = require_db(&state)?;
-    store_totp(&db, &key, &credential_id, &config)
+    store_totp(&db, &key, &credential_id, &config)?;
+    Ok(true)
 }
 
 #[tauri::command]
