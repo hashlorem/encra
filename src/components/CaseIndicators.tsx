@@ -35,6 +35,8 @@ const count = (n: number, one: string, many: string) => `${n.toLocaleString()} $
 
 interface CaseIndicatorsProps {
   projectId: string;
+  /** The case has a description, which is searched too. */
+  described: boolean;
   entries: number;
   files: number;
 }
@@ -44,7 +46,7 @@ interface CaseIndicatorsProps {
  * evidence, refanged and checked in Rust. Shown defanged by default so a
  * pasted list can't turn into live links.
  */
-export function CaseIndicators({ projectId, entries, files }: CaseIndicatorsProps) {
+export function CaseIndicators({ projectId, described, entries, files }: CaseIndicatorsProps) {
   const [indicators, setIndicators] = useState<Indicator[] | null>(null);
   const [defanged, setDefanged] = useState(true);
   const [error, setError] = useState("");
@@ -88,7 +90,13 @@ export function CaseIndicators({ projectId, entries, files }: CaseIndicatorsProp
     return error ? <p className="error" role="alert">{error}</p> : <p className="status" role="status">Reading the case…</p>;
   }
 
-  const from = [count(entries, "entry", "entries"), files > 0 && count(files, "evidence file", "evidence files")].filter(Boolean).join(" and ");
+  // "the case description, 3 entries and 1 evidence file"
+  const searched = [
+    described && "the case description",
+    entries > 0 && count(entries, "entry", "entries"),
+    files > 0 && count(files, "evidence file", "evidence files"),
+  ].filter((part): part is string => Boolean(part));
+  const from = searched.length < 3 ? searched.join(" and ") : `${searched[0]}, ${searched[1]} and ${searched[2]}`;
 
   return (
     <section className="indicators" aria-label="Indicators">
@@ -96,8 +104,8 @@ export function CaseIndicators({ projectId, entries, files }: CaseIndicatorsProp
         <p className="summary">
           {indicators.length > 0
             ? `${count(indicators.length, "indicator", "indicators")} from ${from}.`
-            : entries === 0 && files === 0
-              ? "No notes or evidence in this case yet."
+            : searched.length === 0
+              ? "Nothing in this case yet to find indicators in."
               : `No indicators in ${from}.`}
         </p>
         {indicators.length > 0 && (

@@ -269,7 +269,9 @@ function Journal({ requested }: { requested?: Requested | null }) {
             </div>
 
             {tab === "evidence" && <EvidencePanel projectId={project.id} dropToken={dropToken} onCount={setEvidenceCount} />}
-            {tab === "indicators" && <CaseIndicators projectId={project.id} entries={entries.length} files={evidenceCount ?? 0} />}
+            {tab === "indicators" && (
+              <CaseIndicators projectId={project.id} described={project.description.trim() !== ""} entries={entries.length} files={evidenceCount ?? 0} />
+            )}
             {tab === "timeline" && <CaseTimeline projectId={project.id} />}
             {tab === "notes" && (
               <>
@@ -355,6 +357,7 @@ function Journal({ requested }: { requested?: Requested | null }) {
 
             <div className="actions no-print">
               {tab === "notes" && <button className="btn-outline" onClick={() => window.print()}>Print case</button>}
+              {tab === "timeline" && <button className="btn-outline" onClick={() => window.print()}>Print timeline</button>}
               <button className="btn-danger" onClick={() => setPendingDeleteProject(project)}>Delete case</button>
             </div>
           </div>

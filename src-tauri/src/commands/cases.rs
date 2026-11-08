@@ -4,7 +4,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tauri::Manager;
 
 use crate::clipboard::ClipboardGuard;
@@ -214,14 +214,30 @@ pub(crate) fn add_entries(state: tauri::State<AppState>, inputs: Vec<journal::En
 
 // ===== Indicators and timeline =====
 
-/// What indicators are pulled from: each entry (title and text), and each
-/// evidence file (its name, hashes and custody notes).
+/// The label indicators found in a case's own description carry.
+pub(crate) const DESCRIPTION_SOURCE: &str = "Case description";
+
+/// What indicators are pulled from: the case's description ("What
+/// happened"), each entry (title and text), and each evidence file (its name,
+/// hashes and custody notes).
 pub(crate) fn case_sources(db: &Connection, key: &[u8; 32], dir: &Path, project_id: &str) -> Result<Vec<(String, String)>, String> {
-    let mut sources: Vec<(String, String)> = entries_of(db, key, project_id)?
-        .into_iter()
-        .rev()
-        .map(|entry| (entry.title.clone(), format!("{}\n{}", entry.title, entry.content)))
-        .collect();
+    let mut sources = Vec::new();
+    let description: Option<String> = db
+        .query_row("SELECT COALESCE(description, '') FROM projects WHERE id = ?1", [project_id], |r| r.get(0))
+        .optional()
+        .map_err(|e| e.to_string())?;
+    if let Some(stored) = description.filter(|stored| !stored.is_empty()) {
+        let text = fields::open_to_string(key, "projects", project_id, "description", &stored).unwrap_or_default();
+        if !text.trim().is_empty() {
+            sources.push((DESCRIPTION_SOURCE.to_string(), text));
+        }
+    }
+    sources.extend(
+        entries_of(db, key, project_id)?
+            .into_iter()
+            .rev()
+            .map(|entry| (entry.title.clone(), format!("{}\n{}", entry.title, entry.content))),
+    );
     for item in evidence::list(db, key, dir, project_id)? {
         let notes: Vec<String> = evidence::custody(db, key, &item.id)?.events.into_iter().filter(|e| e.action == "note").map(|e| e.detail).collect();
         let text = format!("{}\n{}\n{}\n{}\n{}", item.name, item.hashes.sha256, item.hashes.sha1, item.hashes.md5, notes.join("\n"));

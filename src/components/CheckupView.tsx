@@ -57,34 +57,81 @@ function seen(count: number): string {
   return count === 1 ? "seen in breaches once" : `seen in breaches ${count.toLocaleString()} times`;
 }
 
-interface Row {
-  id: string;
-  label: ReactNode;
+interface LoginLineProps {
+  login: LoginRef;
+  /** What was found, after the username: "since 2 March 2025". */
+  detail?: string;
+  action: string;
+  onAction: () => void;
+  nested?: boolean;
 }
 
+/**
+ * One login on a finding line: its name, what was found, then the action,
+ * in fixed columns so the details line up from row to row and section to
+ * section.
+ */
+function LoginLine({ login, detail, action, onAction, nested }: LoginLineProps) {
+  return (
+    <div className={nested ? "line-row is-login is-nested rise" : "line-row is-login"}>
+      <span className="line-name">{login.service}</span>
+      <span className="line-detail meta">{[login.username, detail].filter(Boolean).join(" · ")}</span>
+      <button className="btn-text" onClick={onAction}>{action}</button>
+    </div>
+  );
+}
+
+interface Row {
+  login: LoginRef;
+  detail?: string;
+}
+
+interface FindingProps {
+  title: string;
+  /** The summary line: a sentence, or one login standing for the rest. */
+  summary: ReactNode | Row;
+  rows: Row[];
+  onOpen: (id: string) => void;
+}
+
+const isRow = (value: ReactNode | Row): value is Row => typeof value === "object" && value !== null && "login" in value;
+
 /** A long finding as one summary line; Show all lists every login in it. */
-function Finding({ title, summary, rows }: { title: string; summary: ReactNode; rows: Row[] }) {
+function Finding({ title, summary, rows, onOpen }: FindingProps) {
   const [open, setOpen] = useState(false);
+  const toggle = (
+    <button className="btn-text" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
+      {open ? "Show fewer" : "Show all"}
+    </button>
+  );
   return (
     <section className="finding">
       <h3 className="section-title">{title}</h3>
-      <div className="line-row">
-        <span className="line-copy">{summary}</span>
-        <button className="btn-text" aria-expanded={open} onClick={() => setOpen((value) => !value)}>
-          {open ? "Show fewer" : "Show all"}
-        </button>
-      </div>
-      {open && rows.map((row) => <div key={row.id} className="line-row is-nested rise">{row.label}</div>)}
+      {isRow(summary) ? (
+        <div className="line-row is-login">
+          <span className="line-name">{summary.login.service}</span>
+          <span className="line-detail meta">{summary.detail}</span>
+          {toggle}
+        </div>
+      ) : (
+        <div className="line-row">
+          <span className="line-copy">{summary}</span>
+          {toggle}
+        </div>
+      )}
+      {open && rows.map((row) => (
+        <LoginLine key={row.login.id} {...row} action="Open" onAction={() => onOpen(row.login.id)} nested />
+      ))}
     </section>
   );
 }
 
 /** A short finding: every login on its own line. */
-function Short({ title, rows }: { title: string; rows: Row[] }) {
+function Short({ title, rows, onOpen }: { title: string; rows: Row[]; onOpen: (id: string) => void }) {
   return (
     <section className="finding">
       <h3 className="section-title">{title}</h3>
-      {rows.map((row) => <div key={row.id} className="line-row">{row.label}</div>)}
+      {rows.map((row) => <LoginLine key={row.login.id} {...row} action="Open" onAction={() => onOpen(row.login.id)} />)}
     </section>
   );
 }
@@ -96,17 +143,8 @@ function Short({ title, rows }: { title: string; rows: Row[] }) {
  */
 export function CheckupView({ checkup, progress, checking, onCheckAll, onOpen, onChange }: CheckupViewProps) {
   const last = checkup.last_checked ? parseStored(checkup.last_checked) : null;
-  const open = (login: LoginRef, extra?: string) => ({
-    id: login.id,
-    label: (
-      <>
-        <span className="line-copy">
-          <span className="label">{login.service}</span> <span className="meta">{[login.username, extra].filter(Boolean).join(" · ")}</span>
-        </span>
-        <button className="btn-text" onClick={() => onOpen(login.id)}>Open</button>
-      </>
-    ),
-  });
+  const weak = checkup.weak.map((login) => ({ login }));
+  const old = checkup.old.map(({ login, since }) => ({ login, detail: `since ${formatDate(since)}` }));
   const percent = progress && progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : null;
   const firstFew = (list: LoginRef[]) => names(labels(list.slice(0, 3)));
 
@@ -123,13 +161,7 @@ export function CheckupView({ checkup, progress, checking, onCheckAll, onOpen, o
         <section className="finding">
           <h3 className="section-title is-danger">In a breach</h3>
           {checkup.breached.map(({ login, count }) => (
-            <div key={login.id} className="line-row">
-              <span className="line-copy">
-                <span className="label">{login.service}</span>{" "}
-                <span className="meta">{[login.username, seen(count)].filter(Boolean).join(" · ")}</span>
-              </span>
-              <button className="btn-text" onClick={() => onChange(login.id)}>Change</button>
-            </div>
+            <LoginLine key={login.id} login={login} detail={seen(count)} action="Change" onAction={() => onChange(login.id)} />
           ))}
         </section>
       )}
@@ -143,30 +175,25 @@ export function CheckupView({ checkup, progress, checking, onCheckAll, onOpen, o
         </section>
       )}
 
-      {checkup.weak.length > 3 && (
+      {weak.length > 3 && (
         <Finding
           title="Weak"
-          summary={<>{firstFew(checkup.weak)} <span className="meta">and {(checkup.weak.length - 3).toLocaleString()} more</span></>}
-          rows={checkup.weak.map((login) => open(login))}
+          summary={<>{firstFew(checkup.weak)} <span className="meta">and {(weak.length - 3).toLocaleString()} more</span></>}
+          rows={weak}
+          onOpen={onOpen}
         />
       )}
-      {checkup.weak.length > 0 && checkup.weak.length <= 3 && <Short title="Weak" rows={checkup.weak.map((login) => open(login))} />}
+      {weak.length > 0 && weak.length <= 3 && <Short title="Weak" rows={weak} onOpen={onOpen} />}
 
-      {checkup.old.length > 1 && (
+      {old.length > 1 && (
         <Finding
           title="Not changed in over a year"
-          summary={
-            <>
-              {checkup.old[0].login.service}{" "}
-              <span className="meta">since {formatDate(checkup.old[0].since)}, and {(checkup.old.length - 1).toLocaleString()} more</span>
-            </>
-          }
-          rows={checkup.old.map(({ login, since }) => open(login, `since ${formatDate(since)}`))}
+          summary={{ login: old[0].login, detail: `${old[0].detail}, and ${(old.length - 1).toLocaleString()} more` }}
+          rows={old}
+          onOpen={onOpen}
         />
       )}
-      {checkup.old.length === 1 && (
-        <Short title="Not changed in over a year" rows={[open(checkup.old[0].login, `since ${formatDate(checkup.old[0].since)}`)]} />
-      )}
+      {old.length === 1 && <Short title="Not changed in over a year" rows={old} onOpen={onOpen} />}
 
       {checking && (
         <div className="progress-line fade" role="status">
@@ -198,12 +225,7 @@ function ReusedGroup({ group, onOpen }: { group: LoginRef[]; onOpen: (id: string
         </button>
       </div>
       {open && group.map((login) => (
-        <div key={login.id} className="line-row is-nested rise">
-          <span className="line-copy">
-            <span className="label">{login.service}</span> <span className="meta">{login.username}</span>
-          </span>
-          <button className="btn-text" onClick={() => onOpen(login.id)}>Open</button>
-        </div>
+        <LoginLine key={login.id} login={login} action="Open" onAction={() => onOpen(login.id)} nested />
       ))}
     </>
   );

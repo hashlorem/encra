@@ -80,9 +80,6 @@ export function CaseTimeline({ projectId }: { projectId: string }) {
           );
         })}
       </ol>
-      <div className="actions no-print">
-        <button className="btn-outline" onClick={() => window.print()}>Print timeline</button>
-      </div>
       <p className="meta print-only">Printed from Encra on {formatDate(new Date().toISOString())}. Times are this Mac’s clock.</p>
     </section>
   );

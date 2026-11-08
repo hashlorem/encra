@@ -81,7 +81,7 @@ fn test_case_indicators_and_timeline_draw_on_notes_and_evidence() {
     let seal = |table: &str, id: &str, column: &str, value: &str| crate::fields::seal(&dek, table, id, column, value).unwrap();
     conn.execute(
         "INSERT INTO projects (id, name, description, created_at) VALUES ('case', ?1, ?2, '2026-11-03 09:12:40')",
-        [seal("projects", "case", "name", "Phishing, finance mailbox"), seal("projects", "case", "description", "Wire request from a lookalike")],
+        [seal("projects", "case", "name", "Phishing, finance mailbox"), seal("projects", "case", "description", "Wire request from a lookalike, first reported from 192.0.2.10")],
     )
     .unwrap();
     for (id, title, content, at) in [
@@ -107,6 +107,8 @@ fn test_case_indicators_and_timeline_draw_on_notes_and_evidence() {
     assert!(has(Kind::Domain, "invoices-examp1e.com") && has(Kind::Url, "https://invoices-examp1e.com/pay"));
     assert!(has(Kind::Sha256, &item.hashes.sha256) && has(Kind::Md5, &item.hashes.md5), "evidence hashes");
     assert!(has(Kind::Cve, "CVE-2023-23397"));
+    let reported = found.iter().find(|i| i.value == "192.0.2.10").expect("the case's own description is searched too");
+    assert_eq!(reported.sources, ["Case description"]);
     let domain = found.iter().find(|i| i.value == "invoices-examp1e.com").unwrap();
     assert_eq!(domain.sources, ["Header analysis", "Gateway log"], "oldest note first");
     assert!(!found.iter().any(|i| i.value.contains("invoice.pdf")), "the file name is not a domain");

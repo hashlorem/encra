@@ -198,8 +198,10 @@ reading.
   yet. Add your first one." Not cute, no prompt syntax.
 - **Findings** (check-up, indicators). A section title, then one line per
   finding on hairlines, with its action at the end: Change, Review, Show
-  all, Copy. A long finding collapses to one summary line. Only "In a
-  breach" takes `--danger`.
+  all, Copy. A login's line keeps three columns (name, what was found,
+  action), so details line up from row to row and section to section;
+  logins listed under a summary line indent their name only. A long finding
+  collapses to one summary line. Only "In a breach" takes `--danger`.
 - **Case tabs.** Notes, Evidence, Indicators, Timeline: text tabs on a
   hairline, the current one with a 2px `--ink` underline.
 - **⌘K palette.** Opens near the top of the window: one field, then results

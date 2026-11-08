@@ -1135,12 +1135,32 @@ kbd,
   border-bottom: 1px solid var(--rule);
 }
 
-.line-row.is-nested {
+/* Logins listed under a summary line: the name steps in, the columns stay. */
+.line-row.is-nested .line-name {
   padding-left: 24px;
 }
 
 .line-copy {
   flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* A login on a finding line: name, what was found, then the action, in
+   columns, so the details line up from row to row and section to section. */
+.line-row.is-login {
+  display: grid;
+  grid-template-columns: minmax(0, 13em) minmax(0, 1fr) auto;
+}
+
+.line-name {
+  overflow: hidden;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.line-detail {
   min-width: 0;
   overflow-wrap: anywhere;
 }

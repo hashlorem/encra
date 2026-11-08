@@ -877,7 +877,8 @@ wording.
 ### 9.4 Case indicators and timeline
 
 - Indicators (domains, URLs, IPs, emails, hashes, CVEs) are extracted in Rust
-  from the decrypted notes, evidence names, hashes and custody notes.
+  from the decrypted case description, notes, evidence names, hashes and
+  custody notes.
   Defanged text is refanged first; domains are checked against a dated copy
   of the IANA TLD list, and file-like TLDs (`.zip`, `.mov`) are marked as
   possible domains. They are shown defanged by default.
