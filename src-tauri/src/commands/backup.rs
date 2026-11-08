@@ -114,13 +114,18 @@ impl PendingBackup {
         Ok(token)
     }
 
-    /// The contents for `token`, once. A wrong or stale token gets nothing.
-    pub(crate) fn take(&self, token: &str, now: Instant) -> Result<Zeroizing<String>, String> {
+    /// Run `act` on the contents for `token`, clearing them only when `act`
+    /// succeeds (check, act, then consume): a wrong backup password can be
+    /// retried without picking the file again.
+    pub(crate) fn with_staged<T>(&self, token: &str, now: Instant, act: impl FnOnce(&str) -> Result<T, String>) -> Result<T, String> {
         let mut pending = self.0.lock().map_err(|e| e.to_string())?;
-        match pending.take() {
-            Some(staged) if staged.token == token && now.duration_since(staged.at) < STAGE_TTL => Ok(staged.contents),
-            _ => Err("that backup file is no longer open; choose it again".into()),
-        }
+        let contents = match pending.as_ref() {
+            Some(staged) if staged.token == token && now.duration_since(staged.at) < STAGE_TTL => &staged.contents,
+            _ => return Err("that backup file is no longer open; choose it again".into()),
+        };
+        let result = act(contents)?;
+        *pending = None;
+        Ok(result)
     }
 
     pub(crate) fn clear(&self) {
@@ -166,19 +171,20 @@ pub(crate) fn import_backup(
 ) -> Result<(), String> {
     let key = require_unlocked(&state)?;
     reject_empty_password(&backup_password, "Backup password")?;
-    let bundled = pending.take(&token, Instant::now())?;
-    let db = require_db(&state)?;
+    pending.with_staged(&token, Instant::now(), |bundled| {
+        let db = require_db(&state)?;
+        let json = open_backup(bundled, &backup_password)?;
+        let data: backup::VaultBackup = serde_json::from_str(&json).map_err(|_| "invalid backup format — unreadable contents".to_string())?;
 
-    let json = open_backup(&bundled, &backup_password)?;
-    let data: backup::VaultBackup = serde_json::from_str(&json).map_err(|_| "invalid backup format — unreadable contents".to_string())?;
-
-    // Plain text throughout, then sealed row by row under this vault's key as
-    // each row gets its new id. A 1.0 payload this key cannot decrypt is
-    // rejected rather than written back as unreadable bytes.
-    let prepared = backup::prepare_for_import(data, &key)?;
-    backup::restore_all(&db, &key, &prepared)?;
-    activity::log_action(&db, "backup_import", "vault data imported");
-    seal_log(&db, &key);
+        // Plain text throughout, then sealed row by row under this vault's key
+        // as each row gets its new id. A 1.0 payload this key cannot decrypt is
+        // rejected rather than written back as unreadable bytes.
+        let prepared = backup::prepare_for_import(data, &key)?;
+        backup::restore_all(&db, &key, &prepared)?;
+        activity::log_action(&db, "backup_import", "vault data imported");
+        seal_log(&db, &key);
+        Ok(())
+    })?;
     Ok(())
 }
 
@@ -188,20 +194,20 @@ mod tests {
 
     #[test]
     fn test_a_picked_backup_is_claimed_once_by_its_token() {
+        let read = |contents: &str| Ok(contents.to_string());
         let pending = PendingBackup::default();
-        let token = pending.stage("encra-backup:2:...".into()).unwrap();
-        assert!(pending.take("not-the-token", Instant::now()).is_err());
-        assert!(pending.take(&token, Instant::now()).is_err(), "a wrong token also discards it");
-
         let token = pending.stage("contents".into()).unwrap();
-        assert_eq!(pending.take(&token, Instant::now()).unwrap().as_str(), "contents");
-        assert!(pending.take(&token, Instant::now()).is_err(), "only once");
+        assert!(pending.with_staged("not-the-token", Instant::now(), read).is_err());
+        assert!(pending.with_staged(&token, Instant::now() + STAGE_TTL, read).is_err(), "expired");
 
-        let token = pending.stage("contents".into()).unwrap();
-        assert!(pending.take(&token, Instant::now() + STAGE_TTL).is_err(), "expired");
+        // A wrong password fails the import and keeps the file for a retry.
+        let wrong_password = |_: &str| -> Result<(), String> { Err("wrong backup password".into()) };
+        assert!(pending.with_staged(&token, Instant::now(), wrong_password).is_err());
+        assert_eq!(pending.with_staged(&token, Instant::now(), read).unwrap(), "contents");
+        assert!(pending.with_staged(&token, Instant::now(), read).is_err(), "only once it worked");
 
         let token = pending.stage("contents".into()).unwrap();
         pending.clear();
-        assert!(pending.take(&token, Instant::now()).is_err(), "sealing clears it");
+        assert!(pending.with_staged(&token, Instant::now(), read).is_err(), "sealing clears it");
     }
 }

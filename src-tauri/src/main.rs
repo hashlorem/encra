@@ -15,6 +15,7 @@ mod fields;
 mod migrate;
 mod qr;
 mod evidence;
+mod import;
 mod util;
 mod paths;
 mod db;
@@ -28,9 +29,10 @@ use tauri::{Emitter, Manager};
 use clipboard::ClipboardGuard;
 use commands::agent::{agent_access_enabled, show_main_window, show_waiting_in_menu_bar, AGENT_TRAY, TRAY_IDLE};
 use commands::backup::PendingBackup;
+use commands::import::PendingImport;
 use commands::evidence::EvidenceDir;
 use commands::files::DroppedFiles;
-use commands::{activity as activity_cmd, agent as agent_cmd, backup as backup_cmd, cases, evidence as evidence_cmd, lifecycle, logins, recovery, toolbox};
+use commands::{activity as activity_cmd, agent as agent_cmd, backup as backup_cmd, cases, evidence as evidence_cmd, import as import_cmd, lifecycle, logins, recovery, toolbox};
 use paths::{restrict_permissions, vault_path};
 use vault::AppState;
 
@@ -72,6 +74,7 @@ fn main() {
             app.manage(EvidenceDir(evidence_dir));
             app.manage(DroppedFiles::default());
             app.manage(PendingBackup::default());
+            app.manage(PendingImport::default());
 
             // Enable foreign keys
             conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -156,6 +159,7 @@ fn main() {
             evidence_cmd::verify_evidence, evidence_cmd::export_evidence, evidence_cmd::evidence_custody,
             evidence_cmd::add_evidence_note, evidence_cmd::delete_evidence,
             toolbox::open_nmap_file, toolbox::open_dropped_nmap, toolbox::add_kb_entry, toolbox::get_kb_entries, toolbox::delete_kb_entry,
+            import_cmd::pick_import_file, import_cmd::confirm_import, import_cmd::cancel_import, import_cmd::delete_import_file,
             backup_cmd::export_backup, backup_cmd::pick_backup_file, backup_cmd::import_backup,
             activity_cmd::get_activity_log, activity_cmd::get_activity_older,
             recovery::generate_recovery_codes, recovery::reset_master_password, recovery::verify_master_password,

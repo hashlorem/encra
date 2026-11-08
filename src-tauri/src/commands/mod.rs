@@ -6,6 +6,7 @@ pub mod backup;
 pub mod cases;
 pub mod evidence;
 pub mod files;
+pub mod import;
 pub mod lifecycle;
 pub mod logins;
 pub mod recovery;

@@ -377,6 +377,7 @@ pub(crate) fn lock_vault(
     clipboard: tauri::State<Arc<ClipboardGuard>>,
     hub: tauri::State<Arc<agent::server::Hub>>,
     pending_backup: tauri::State<crate::commands::backup::PendingBackup>,
+    pending_import: tauri::State<crate::commands::import::PendingImport>,
     reason: Option<String>,
 ) -> Result<(), String> {
     // Every lock path (button, shortcut, idle timer, blur) ends here, so this
@@ -386,6 +387,7 @@ pub(crate) fn lock_vault(
     hub.cancel_all("the vault was sealed");
     // A picked backup file waits for its password only while unlocked.
     pending_backup.clear();
+    pending_import.clear();
     let db = require_db(&state)?;
     activity::log_action(&db, "lock", seal_detail(reason.as_deref()));
     let mut key = state.encryption_key.lock().map_err(|e| e.to_string())?;
