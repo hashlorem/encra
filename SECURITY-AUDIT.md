@@ -1,4 +1,6 @@
-# Cobrypt Security Audit Writeup
+# Encra Security Audit Writeup
+
+> Encra was called Cobrypt (and KeyRPT before that) when sections 1 to 7 were written. Section 8 covers the work done after the rename.
 
 > **Audience:** Beginner cybersecurity students and junior developers.  
 > **Date:** July 2026  
@@ -597,3 +599,142 @@ release:
 4. Toggle light/dark on every page.
 5. Open a large Nmap XML and confirm the host/port tables render.
 6. Tab through each modal and confirm focus stays inside it.
+
+---
+
+## 8. Third pass: Encra, November 2026
+
+The rename to Encra came with a rebuilt interface and four rounds of
+hardening. This section covers what changed for security, in the same
+spirit as section 7: what was wrong, what was done, and what is still open.
+
+### 8.1 Secrets stayed in the webview
+
+**Before:** unlocking sent every password to the frontend at once. Any bug or
+injected script in the webview could read the whole vault.
+
+**After:** the list returns names and metadata only. A secret leaves Rust one
+field at a time, through a single-purpose command (`reveal_password`,
+`get_totp`, `copy_credential_field`). Copying happens in Rust too: the value
+goes to the macOS clipboard marked as concealed, so clipboard history apps
+skip it, and the wipe timer only clears the clipboard if it still holds
+Encra's value. Sealing the vault wipes it immediately.
+
+The detail view no longer reports a password's length or character classes.
+That text was visible to anyone looking at the screen and narrowed a guess.
+
+### 8.2 Vault format 3
+
+Format 2 encrypted values, but a ciphertext was not tied to where it was
+stored. Someone with the database file could swap two encrypted values
+(say, the passwords of two logins) and Encra would decrypt both without
+noticing.
+
+Format 3 fixes this and several related gaps:
+
+- **Bound values.** Every field is sealed with AES-GCM using associated data
+  `encra:v1:<table>:<id>:<column>`. A value moved to another row or column
+  fails to decrypt. Once a vault is format 3, unbound values are refused.
+- **Encrypted names.** Login and project names were plaintext so the list
+  could sort them in SQL. They are now encrypted and sorted in Rust.
+- **Stored Argon2 settings.** The key-derivation cost lives in the vault,
+  so it can be raised later. New vaults use m=256 MiB, t=3, p=1 (about
+  320 ms on an M5). Older vaults are upgraded on the next unlock. Settings
+  read from a file are range-checked before use, so a crafted file cannot
+  ask for an absurd amount of memory.
+- **Safe migration.** Before converting, Encra writes a `.pre-v3` copy of
+  the database and checks it. The copy can be deleted from Settings, with a
+  confirmation. After migration the file is vacuumed and `secure_delete` is
+  on, so old plaintext pages do not linger in free space.
+
+Backups use the same rules: a backup file carries its own Argon2 settings,
+and restore re-seals each row for the vault it lands in.
+
+### 8.3 A tamper-evident activity log
+
+The log is readable while the vault is sealed (that is its point), so it
+holds no values or login names. Each entry is now chained with HMAC-SHA256
+under a key derived from the vault key, and the chain head is authenticated.
+Editing, deleting or reordering an entry breaks the chain, and the Activity
+page says so. Entries written while sealed are added to the chain on the next
+unlock. A broken chain is never silently resealed over.
+
+Failed unlocks are logged, and so is how the vault was sealed (button,
+shortcut, idle timer, or switching apps).
+
+### 8.4 Smaller fixes
+
+- Recovery codes were hashed exactly as typed, so a code entered with spaces
+  or lowercase letters failed. Codes are now normalised before checking.
+- The vault file and its folder are restricted to the current user.
+- The breach check sends the padding header, so response sizes do not hint at
+  which password prefix was queried.
+- Debug builds use a separate vault and never open the real one.
+
+### 8.5 Agent access (`encra run`)
+
+`encra run` lets a script or an AI agent use a login without seeing it. The
+command names references like `encra://GitHub#password`, a person approves the
+request in Encra, and the values go straight into the environment of the
+program being run. It is off by default.
+
+What protects it:
+
+- The socket lives in a folder only the current user can open (`0700`), the
+  socket is `0600`, and a lock file stops a second server.
+- Encra checks the caller: same user ID, and the calling process's executable
+  must hash to the same SHA-256 as Encra's own binary.
+- Every request needs a click. There is no "always allow". A request ends with
+  nothing sent if it times out (120 s), the caller disconnects, or the vault
+  seals.
+- The dialog shows the command, its folder, the parent processes, and which
+  login each reference matched. It warns in red about inline scripts
+  (`sh -c`, `python -c`) and when a request asks for a password together with
+  its 2FA code, since that is a full sign-in.
+- The client strips `DYLD_*`, `LD_*` and similar variables that could inject
+  code into the program, and disables core dumps.
+- The log records the agent name, fields and command, never values or login
+  names. Names are checked so they cannot forge log lines.
+
+Requests are shown with a Dock badge and bounce, a menu-bar icon and a chime.
+Encra does not jump to the front, so keystrokes meant for the terminal cannot
+land on the Approve button.
+
+### 8.6 2FA setup from a QR
+
+A 2FA code can be added from a screenshot of the service's QR code or from an
+`otpauth://` link, which also brings settings such as 60-second or eight-digit
+codes. The image is decoded in Rust with size and dimension limits, and a
+decoder panic becomes an ordinary error. After a screenshot is read from the
+clipboard, the clipboard is cleared, because the image holds the secret.
+Export QR codes from authenticator apps and counter-based (HOTP) codes are
+refused.
+
+### 8.7 Still open
+
+- **The app is unsigned.** Without a signature and the hardened runtime,
+  another program running as the same user could inject code into the
+  `encra run` client. The peer check confirms the binary on disk, not what is
+  running inside it. Signing is also what Touch ID unlock would need.
+- **Approving trusts the program as it is right now.** If the program reads
+  the value and prints it, the caller sees it. The dialog shows what will run;
+  it cannot judge it.
+- **Command output is not masked.**
+- **`tauri-plugin-fs` is still exposed** (see 7.12).
+- **No list virtualisation** (see 7.12).
+
+### 8.8 Verification
+
+- `cargo test`: 71 passed, 2 ignored (the live-network HIBP checks).
+  The tests run against real database files and close and reopen them where
+  persistence matters. They cover format 3 migration and rollback, chain
+  tampering, backup envelopes, the full agent flow over a real socket (approve,
+  deny, timeout, disconnect, seal), RFC 6238 vectors for all three hash
+  algorithms, and QR reading from real images.
+- `cargo clippy --all-targets -- -D warnings`: clean in debug and release.
+- `npx tsc --noEmit`: clean.
+- Unlike section 7, the app was run: the release build was installed and
+  tested by hand on macOS, including lock and unlock, auto-lock, and agent
+  requests. QR setup from a real service had not yet been tried when this was
+  written.
+
