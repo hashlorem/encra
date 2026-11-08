@@ -98,6 +98,11 @@ pub fn init_db(path: &Path) -> Result<Connection, String> {
     // Migration: add totp_secret column if upgrading from older schema
     conn.execute("ALTER TABLE credentials ADD COLUMN totp_secret TEXT", [])
         .ok();
+    // Vault check-up: when the password last changed (plain metadata, like
+    // created_at; NULL means since created_at), and the last breach check,
+    // sealed, because which logins are breached is itself sensitive.
+    conn.execute("ALTER TABLE credentials ADD COLUMN password_changed_at TEXT", []).ok();
+    conn.execute("ALTER TABLE credentials ADD COLUMN breach_result TEXT", []).ok();
 
     Ok(conn)
 }

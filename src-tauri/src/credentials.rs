@@ -18,6 +18,8 @@ pub struct CredentialSummary {
     pub username: String,
     pub has_totp: bool,
     pub created_at: String,
+    /// The last breach check found this password.
+    pub breached: bool,
 }
 
 /// The open record, minus the password and 2FA secret.
@@ -33,6 +35,36 @@ pub struct CredentialDetail {
     pub has_password: bool,
     pub has_totp: bool,
     pub created_at: String,
+    /// When the password was last set.
+    pub password_changed_at: String,
+    /// The last breach check, if one was run.
+    pub breach: Option<BreachResult>,
+}
+
+/// What the breach check found for a password, and when.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct BreachResult {
+    pub count: u32,
+    pub checked_at: String,
+}
+
+fn read_breach(key: &[u8; 32], id: &str, stored: Option<String>) -> Option<BreachResult> {
+    let text = fields::open(key, TABLE, id, "breach_result", &stored?).ok()?;
+    let (count, checked_at) = text.split_once('|')?;
+    Some(BreachResult { count: count.parse().ok()?, checked_at: checked_at.to_string() })
+}
+
+/// Remember a breach check for a login, sealed. Replaces the previous one.
+pub fn record_breach(db: &Connection, key: &[u8; 32], id: &str, count: u32) -> Result<BreachResult, String> {
+    let checked_at: String = db.query_row("SELECT datetime('now')", [], |r| r.get(0)).map_err(|e| e.to_string())?;
+    let sealed = fields::seal(key, TABLE, id, "breach_result", &format!("{count}|{checked_at}"))?;
+    let updated = db
+        .execute("UPDATE credentials SET breach_result = ?1 WHERE id = ?2", rusqlite::params![sealed, id])
+        .map_err(|e| e.to_string())?;
+    if updated == 0 {
+        return Err(NOT_FOUND.into());
+    }
+    Ok(BreachResult { count, checked_at })
 }
 
 #[derive(Debug, Serialize, PartialEq)]
@@ -66,7 +98,7 @@ fn display_field(key: &[u8; 32], id: &str, column: &str, stored: &str) -> String
 
 pub fn list_summaries(db: &Connection, key: &[u8; 32]) -> Result<Vec<CredentialSummary>, String> {
     let mut stmt = db
-        .prepare("SELECT id, service, username, totp_secret IS NOT NULL, created_at FROM credentials")
+        .prepare("SELECT id, service, username, totp_secret IS NOT NULL, created_at, breach_result FROM credentials")
         .map_err(|e| e.to_string())?;
     let rows = stmt
         .query_map([], |row| {
@@ -76,6 +108,7 @@ pub fn list_summaries(db: &Connection, key: &[u8; 32]) -> Result<Vec<CredentialS
                 row.get::<_, String>(2)?,
                 row.get::<_, bool>(3)?,
                 row.get::<_, String>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .map_err(|e| e.to_string())?
@@ -85,9 +118,10 @@ pub fn list_summaries(db: &Connection, key: &[u8; 32]) -> Result<Vec<CredentialS
     // Names are encrypted, so the database cannot sort them; sort here.
     let mut list: Vec<CredentialSummary> = rows
         .into_iter()
-        .map(|(id, service, username, has_totp, created_at)| CredentialSummary {
+        .map(|(id, service, username, has_totp, created_at, breach)| CredentialSummary {
             service: fields::open_to_string(key, TABLE, &id, "service", &service).unwrap_or_else(|_| "[unreadable]".into()),
             username: display_field(key, &id, "username", &username),
+            breached: read_breach(key, &id, breach).is_some_and(|b| b.count > 0),
             id,
             has_totp,
             created_at,
@@ -100,7 +134,8 @@ pub fn list_summaries(db: &Connection, key: &[u8; 32]) -> Result<Vec<CredentialS
 pub fn detail(db: &Connection, key: &[u8; 32], id: &str) -> Result<CredentialDetail, String> {
     let row = db
         .query_row(
-            "SELECT id, service, username, url, notes, totp_secret IS NOT NULL, created_at FROM credentials WHERE id = ?1",
+            "SELECT id, service, username, url, notes, totp_secret IS NOT NULL, created_at,
+                    COALESCE(password_changed_at, created_at), breach_result FROM credentials WHERE id = ?1",
             [id],
             |row| {
                 Ok((
@@ -111,6 +146,8 @@ pub fn detail(db: &Connection, key: &[u8; 32], id: &str) -> Result<CredentialDet
                     row.get::<_, Option<String>>(4)?.unwrap_or_default(),
                     row.get::<_, bool>(5)?,
                     row.get::<_, String>(6)?,
+                    row.get::<_, String>(7)?,
+                    row.get::<_, Option<String>>(8)?,
                 ))
             },
         )
@@ -118,16 +155,18 @@ pub fn detail(db: &Connection, key: &[u8; 32], id: &str) -> Result<CredentialDet
         .map_err(|e| e.to_string())?
         .ok_or(NOT_FOUND)?;
 
-    let (id, service, username, url, notes, has_totp, created_at) = row;
+    let (id, service, username, url, notes, has_totp, created_at, password_changed_at, breach) = row;
     Ok(CredentialDetail {
         service: fields::open_to_string(key, TABLE, &id, "service", &service).unwrap_or_else(|_| "[unreadable]".into()),
         username: display_field(key, &id, "username", &username),
         url: display_field(key, &id, "url", &url),
         notes: display_field(key, &id, "notes", &notes),
         has_password: reveal_password(db, key, &id).map(|p| !p.is_empty()).unwrap_or(false),
+        breach: read_breach(key, &id, breach),
         id,
         has_totp,
         created_at,
+        password_changed_at,
     })
 }
 
@@ -179,3 +218,43 @@ pub fn copy_value(db: &Connection, key: &[u8; 32], id: &str, field: CopyField) -
     }
     Ok(value)
 }
+
+/// Save edits to a login. A blank password keeps the stored one. A new
+/// password restarts its age and drops the old breach result, which was
+/// about a different password.
+pub fn update(db: &Connection, key: &[u8; 32], id: &str, input: &crate::vault::CredentialInput) -> Result<(), String> {
+    let seal = |column: &str, value: &str| fields::seal(key, TABLE, id, column, value);
+    // An unreadable old password counts as changed: typing a new one must
+    // always be able to repair a damaged row.
+    let changed = !input.password.is_empty() && reveal_password(db, key, id).map_or(true, |old| old.as_str() != input.password);
+    // A blank or unchanged password keeps the stored value, already bound to
+    // this row and column.
+    let encrypted_pw = if changed {
+        seal("password_encrypted", &input.password)?
+    } else {
+        db.query_row("SELECT password_encrypted FROM credentials WHERE id = ?1", rusqlite::params![id], |row| row.get::<_, String>(0))
+            .map_err(|_| NOT_FOUND.to_string())?
+    };
+    let updated = db
+        .execute(
+            "UPDATE credentials SET service = ?1, username = ?2, password_encrypted = ?3, url = ?4, notes = ?5,
+                 password_changed_at = CASE WHEN ?7 THEN datetime('now') ELSE password_changed_at END,
+                 breach_result = CASE WHEN ?7 THEN NULL ELSE breach_result END
+             WHERE id = ?6",
+            rusqlite::params![
+                seal("service", &input.service)?,
+                seal("username", &input.username)?,
+                encrypted_pw,
+                seal("url", &input.url)?,
+                seal("notes", &input.notes)?,
+                id,
+                changed,
+            ],
+        )
+        .map_err(|e| e.to_string())?;
+    if updated == 0 {
+        return Err(NOT_FOUND.into());
+    }
+    Ok(())
+}
+

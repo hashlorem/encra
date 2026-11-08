@@ -10,4 +10,5 @@ mod agent;
 mod recovery;
 mod backup;
 mod cases;
+mod checkup;
 mod import;

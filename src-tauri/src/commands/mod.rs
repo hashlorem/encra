@@ -4,6 +4,7 @@ pub mod activity;
 pub mod agent;
 pub mod backup;
 pub mod cases;
+pub mod checkup;
 pub mod evidence;
 pub mod files;
 pub mod import;

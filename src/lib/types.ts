@@ -10,13 +10,24 @@ export interface CredentialSummary {
   username: string;
   has_totp: boolean;
   created_at: string;
+  /** The last breach check found this password. */
+  breached: boolean;
+}
+
+/** What the last breach check found, and when (UTC, "YYYY-MM-DD HH:MM:SS"). */
+export interface BreachResult {
+  count: number;
+  checked_at: string;
 }
 
 /** The open record, still without the password or 2FA secret. */
-export interface CredentialDetail extends CredentialSummary {
+export interface CredentialDetail extends Omit<CredentialSummary, "breached"> {
   url: string;
   notes: string;
   has_password: boolean;
+  /** When the password was last set. */
+  password_changed_at: string;
+  breach: BreachResult | null;
 }
 
 export interface TotpCode {

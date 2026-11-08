@@ -9,7 +9,7 @@ use zeroize::Zeroizing;
 
 use crate::vault;
 
-pub const CREDENTIAL_FIELDS: &[&str] = &["service", "username", "password_encrypted", "url", "notes", "totp_secret"];
+pub const CREDENTIAL_FIELDS: &[&str] = &["service", "username", "password_encrypted", "url", "notes", "totp_secret", "breach_result"];
 pub const PROJECT_FIELDS: &[&str] = &["name", "description", "target", "methodology"];
 pub const ENTRY_FIELDS: &[&str] = &["title", "content"];
 pub const KB_FIELDS: &[&str] = &["title", "command", "description", "tags"];

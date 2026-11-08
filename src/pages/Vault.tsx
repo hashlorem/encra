@@ -343,8 +343,9 @@ function Vault() {
           items={filtered}
           getKey={(c) => c.id}
           renderRow={(c) => {
+            // This session's check if there was one, else the remembered one.
             const result = breaches[c.id];
-            const breached = result?.state === "done" && result.count > 0;
+            const breached = result ? result.state === "done" && result.count > 0 : c.breached;
             return (
               <button
                 className="row"
@@ -449,7 +450,15 @@ function Vault() {
 
             {detail.has_password && (
               <p key={breach?.state ?? "unchecked"} className="summary fade">
-                {!breach && "Not checked against known breaches."}
+                {!breach && !detail.breach && "Not checked against known breaches."}
+                {!breach && detail.breach && detail.breach.count === 0 &&
+                  `Not found in known breaches when Encra checked, on ${formatDate(detail.breach.checked_at)}.`}
+                {!breach && detail.breach && detail.breach.count > 0 && (
+                  <span className="error">
+                    Found in {detail.breach.count.toLocaleString()} known breaches when Encra checked, on{" "}
+                    {formatDate(detail.breach.checked_at)}. Change it.
+                  </span>
+                )}
                 {breach?.state === "checking" && "Checking known breaches…"}
                 {breach?.state === "failed" && "The breach check couldn’t reach the service."}
                 {breach?.state === "done" && breach.count === 0 && "Not found in known breaches."}
@@ -467,7 +476,7 @@ function Vault() {
                   onClick={() => void checkBreach()}
                   disabled={breach?.state === "checking"}
                 >
-                  {breach ? "Check breaches again" : "Check breaches"}
+                  {breach || detail.breach ? "Check breaches again" : "Check breaches"}
                 </button>
               )}
               <button className="btn-danger" onClick={() => setPendingDelete(detail)}>Delete login</button>

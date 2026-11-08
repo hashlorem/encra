@@ -95,7 +95,12 @@ pub(crate) async fn check_credential_breach(state: tauri::State<'_, AppState>, i
     if password.is_empty() {
         return Err("that login has no password".into());
     }
-    hibp::check_password(&password).await
+    let count = hibp::check_password(&password).await?;
+    // Remembered, sealed, so the Vault and the check-up know it next time.
+    let key = require_unlocked(&state)?;
+    let db = require_db(&state)?;
+    credentials::record_breach(&db, &key, &id, count)?;
+    Ok(count)
 }
 
 #[tauri::command]
@@ -134,29 +139,7 @@ pub(crate) fn update_credential(state: tauri::State<AppState>, id: String, input
     let db = require_db(&state)?;
     validate_credential(&input)?;
 
-    let seal = |column: &str, value: &str| fields::seal(&key, "credentials", &id, column, value);
-    // A blank password keeps the stored one, which is already bound to this
-    // row and column.
-    let encrypted_pw = if input.password.is_empty() {
-        db.query_row("SELECT password_encrypted FROM credentials WHERE id = ?1", rusqlite::params![id], |row| row.get::<_, String>(0))
-            .map_err(|_| "credential not found".to_string())?
-    } else {
-        seal("password_encrypted", &input.password)?
-    };
-    let encrypted_service = seal("service", &input.service)?;
-    let encrypted_user = seal("username", &input.username)?;
-    let encrypted_url = seal("url", &input.url)?;
-    let encrypted_notes = seal("notes", &input.notes)?;
-
-    let updated = db.execute(
-        "UPDATE credentials SET service=?1, username=?2, password_encrypted=?3, url=?4, notes=?5 WHERE id=?6",
-        rusqlite::params![encrypted_service, encrypted_user, encrypted_pw, encrypted_url, encrypted_notes, id],
-    ).map_err(|e| e.to_string())?;
-    if updated == 0 {
-        return Err("credential not found".into());
-    }
-
-    Ok(())
+    credentials::update(&db, &key, &id, &input)
 }
 
 #[tauri::command]

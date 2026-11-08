@@ -16,6 +16,7 @@ mod migrate;
 mod qr;
 mod evidence;
 mod import;
+mod checkup;
 mod util;
 mod paths;
 mod db;
@@ -32,7 +33,7 @@ use commands::backup::PendingBackup;
 use commands::import::PendingImport;
 use commands::evidence::EvidenceDir;
 use commands::files::DroppedFiles;
-use commands::{activity as activity_cmd, agent as agent_cmd, backup as backup_cmd, cases, evidence as evidence_cmd, import as import_cmd, lifecycle, logins, recovery, toolbox};
+use commands::{activity as activity_cmd, agent as agent_cmd, backup as backup_cmd, cases, checkup as checkup_cmd, evidence as evidence_cmd, import as import_cmd, lifecycle, logins, recovery, toolbox};
 use paths::{restrict_permissions, vault_path};
 use vault::AppState;
 
@@ -150,6 +151,7 @@ fn main() {
             logins::add_credential, logins::update_credential, logins::delete_credential,
             logins::setup_totp, logins::setup_totp_from_clipboard, logins::setup_totp_from_image, logins::remove_totp,
             logins::check_hibp,
+            checkup_cmd::vault_checkup, checkup_cmd::check_all_breaches,
             lifecycle::vault_status, lifecycle::create_vault, lifecycle::unlock_vault, lifecycle::lock_vault,
             lifecycle::safety_copy_exists, lifecycle::delete_safety_copy,
             agent_cmd::agent_status, agent_cmd::set_agent_access, agent_cmd::agent_pending, agent_cmd::agent_decide,
