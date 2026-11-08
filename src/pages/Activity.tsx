@@ -22,6 +22,8 @@ const ACTION_LABELS: Record<string, string> = {
   agent_cancelled: "Agent request cancelled",
   agent_timeout: "Agent request expired",
   agent_refused: "Agent connection refused",
+  evidence_added: "Evidence added",
+  evidence_deleted: "Evidence removed",
   backup_export: "Backup exported",
   backup_import: "Backup restored",
   recovery: "Recovery code used",

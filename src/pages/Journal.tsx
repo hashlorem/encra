@@ -1,8 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
+import { EvidencePanel } from "../components/EvidencePanel";
 import { describeError } from "../lib/errors";
 import { formatDate, formatShortDate, formatTime, parseStored } from "../lib/format";
 import type { EntryInput, JournalEntry, Project, ProjectInput } from "../lib/types";
@@ -64,6 +66,22 @@ function Journal() {
   const [pendingDeleteEntry, setPendingDeleteEntry] = useState<JournalEntry | null>(null);
   const [deleting, setDeleting] = useState(false);
 
+  const [tab, setTab] = useState<"notes" | "evidence">("notes");
+  const [evidenceCount, setEvidenceCount] = useState<number | null>(null);
+  const [dropToken, setDropToken] = useState(0);
+
+  // Files dropped on the window go to the open case's evidence. Rust keeps
+  // the paths; this only says a drop happened.
+  useEffect(() => {
+    const stop = listen<number>("evidence-dropped", () => {
+      setTab("evidence");
+      setDropToken((n) => n + 1);
+    });
+    return () => {
+      void stop.then((unlisten) => unlisten());
+    };
+  }, []);
+
   // Drops a slow response for a case the user has already left.
   const entryRequest = useRef(0);
 
@@ -105,6 +123,7 @@ function Journal() {
 
   useEffect(() => {
     setEntryForm(EMPTY_ENTRY);
+    setEvidenceCount(null);
     if (selectedId) void loadEntries(selectedId);
     else setEntries([]);
   }, [selectedId, loadEntries]);
@@ -185,7 +204,8 @@ function Journal() {
         `Opened ${formatDate(project.created_at)}`,
         STATUS_LABELS[project.status] ?? project.status,
         `${entries.length} ${entries.length === 1 ? "entry" : "entries"}`,
-      ].join(" · ")
+        evidenceCount ? `${evidenceCount} ${evidenceCount === 1 ? "file" : "files"}` : "",
+      ].filter(Boolean).join(" · ")
     : "";
 
   return (
@@ -231,85 +251,97 @@ function Journal() {
               )}
             </header>
 
-            <form
-              className="composer"
-              onSubmit={(event) => {
-                event.preventDefault();
-                void addEntry();
-              }}
-            >
-              <div className="composer-line">
-                <label className="sr-only" htmlFor="entry-title">New entry</label>
-                <input
-                  id="entry-title"
-                  className="input"
-                  placeholder="What did you find?"
-                  value={entryForm.title}
-                  onChange={(event) => setEntryForm({ ...entryForm, title: event.target.value })}
-                />
-                <label className="inline-select">
-                  Kind
-                  <select value={entryForm.entry_type} onChange={(event) => setEntryForm({ ...entryForm, entry_type: event.target.value })}>
-                    {KINDS.map((kind) => <option key={kind.value} value={kind.value}>{kind.label}</option>)}
-                  </select>
-                </label>
-                <label className="inline-select">
-                  Severity
-                  <select value={entryForm.severity} onChange={(event) => setEntryForm({ ...entryForm, severity: event.target.value })}>
-                    {SEVERITIES.map((severity) => <option key={severity} value={severity}>{severity}</option>)}
-                  </select>
-                </label>
-              </div>
-              {entryForm.title && (
-                <>
-                  <label className="sr-only" htmlFor="entry-content">Details</label>
-                  <textarea
-                    id="entry-content"
-                    className="textarea"
-                    placeholder="Details, indicators, hashes. ⌘↵ saves."
-                    value={entryForm.content}
-                    onChange={(event) => setEntryForm({ ...entryForm, content: event.target.value })}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
-                        event.preventDefault();
-                        void addEntry();
-                      }
-                    }}
+            <div className="case-tabs no-print" role="tablist" aria-label="Case sections">
+              <button role="tab" aria-selected={tab === "notes"} onClick={() => setTab("notes")}>Notes</button>
+              <button role="tab" aria-selected={tab === "evidence"} onClick={() => setTab("evidence")}>Evidence</button>
+            </div>
+
+            {tab === "evidence" ? (
+              <EvidencePanel projectId={project.id} dropToken={dropToken} onCount={setEvidenceCount} />
+            ) : (
+              <>
+              <form
+                className="composer"
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void addEntry();
+                }}
+              >
+                <div className="composer-line">
+                  <label className="sr-only" htmlFor="entry-title">New entry</label>
+                  <input
+                    id="entry-title"
+                    className="input"
+                    placeholder="What did you find?"
+                    value={entryForm.title}
+                    onChange={(event) => setEntryForm({ ...entryForm, title: event.target.value })}
                   />
-                  <div className="actions">
-                    <button className="btn" type="submit" disabled={savingEntry}>{savingEntry ? "Saving…" : "Add entry"}</button>
-                    <button className="btn-text" type="button" onClick={() => setEntryForm(EMPTY_ENTRY)}>Discard</button>
-                  </div>
-                </>
-              )}
-            </form>
-
-            {loadingEntries && <p className="status" role="status">Loading notes…</p>}
-            {!loadingEntries && ordered.length === 0 && <p className="lead">No entries yet. Write the first one above.</p>}
-
-            <ol className="entries stagger">
-              {ordered.map((entry) => {
-                const when = parseStored(entry.created_at);
-                return (
-                  <li key={entry.id}>
-                    <span className="entry-when">
-                      {when ? <>{formatShortDate(when)}<br />{formatTime(when)}</> : entry.created_at}
-                    </span>
-                    <div className="entry-body">
-                      <h3 className="entry-title">{entry.title}</h3>
-                      <EntryKind entry={entry} />
-                      {entry.content && <p className="entry-text">{entry.content}</p>}
-                      <div className="actions no-print">
-                        <button className="btn-danger" onClick={() => setPendingDeleteEntry(entry)}>Delete</button>
-                      </div>
+                  <label className="inline-select">
+                    Kind
+                    <select value={entryForm.entry_type} onChange={(event) => setEntryForm({ ...entryForm, entry_type: event.target.value })}>
+                      {KINDS.map((kind) => <option key={kind.value} value={kind.value}>{kind.label}</option>)}
+                    </select>
+                  </label>
+                  <label className="inline-select">
+                    Severity
+                    <select value={entryForm.severity} onChange={(event) => setEntryForm({ ...entryForm, severity: event.target.value })}>
+                      {SEVERITIES.map((severity) => <option key={severity} value={severity}>{severity}</option>)}
+                    </select>
+                  </label>
+                </div>
+                {entryForm.title && (
+                  <>
+                    <label className="sr-only" htmlFor="entry-content">Details</label>
+                    <textarea
+                      id="entry-content"
+                      className="textarea"
+                      placeholder="Details, indicators, hashes. ⌘↵ saves."
+                      value={entryForm.content}
+                      onChange={(event) => setEntryForm({ ...entryForm, content: event.target.value })}
+                      onKeyDown={(event) => {
+                        if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+                          event.preventDefault();
+                          void addEntry();
+                        }
+                      }}
+                    />
+                    <div className="actions">
+                      <button className="btn" type="submit" disabled={savingEntry}>{savingEntry ? "Saving…" : "Add entry"}</button>
+                      <button className="btn-text" type="button" onClick={() => setEntryForm(EMPTY_ENTRY)}>Discard</button>
                     </div>
-                  </li>
-                );
-              })}
-            </ol>
+                  </>
+                )}
+              </form>
+
+              {loadingEntries && <p className="status" role="status">Loading notes…</p>}
+              {!loadingEntries && ordered.length === 0 && <p className="lead">No entries yet. Write the first one above.</p>}
+
+              <ol className="entries stagger">
+                {ordered.map((entry) => {
+                  const when = parseStored(entry.created_at);
+                  return (
+                    <li key={entry.id}>
+                      <span className="entry-when">
+                        {when ? <>{formatShortDate(when)}<br />{formatTime(when)}</> : entry.created_at}
+                      </span>
+                      <div className="entry-body">
+                        <h3 className="entry-title">{entry.title}</h3>
+                        <EntryKind entry={entry} />
+                        {entry.content && <p className="entry-text">{entry.content}</p>}
+                        <div className="actions no-print">
+                          <button className="btn-danger" onClick={() => setPendingDeleteEntry(entry)}>Delete</button>
+                        </div>
+                      </div>
+                    </li>
+                  );
+                })}
+              </ol>
+
+              </>
+            )}
 
             <div className="actions no-print">
-              <button className="btn-outline" onClick={() => window.print()}>Print case</button>
+              {tab === "notes" && <button className="btn-outline" onClick={() => window.print()}>Print case</button>}
               <button className="btn-danger" onClick={() => setPendingDeleteProject(project)}>Delete case</button>
             </div>
           </div>
@@ -357,7 +389,7 @@ function Journal() {
       {pendingDeleteProject && (
         <ConfirmDialog
           title={`Delete ${pendingDeleteProject.name}?`}
-          message="The case and every entry in it are removed. This can’t be undone."
+          message="The case, every entry and every evidence file in it are removed. Your original files aren’t touched. This can’t be undone."
           confirmLabel="Delete case"
           busy={deleting}
           onConfirm={() => void confirmDeleteProject()}

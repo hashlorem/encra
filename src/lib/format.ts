@@ -47,3 +47,22 @@ export function dayLabel(date: Date, now = new Date()): string {
 export function groupCode(code: string): string {
   return code.match(/.{1,4}/g)?.join(" ") ?? code;
 }
+
+/** "12.4 MB", in the decimal units Finder uses. */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1000) return `${bytes} ${bytes === 1 ? "byte" : "bytes"}`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = bytes / 1000;
+  let unit = 0;
+  while (value >= 1000 && unit < units.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
+/** "13,002,113 bytes", for records where the exact size matters. */
+export function formatExactBytes(bytes: number): string {
+  return `${bytes.toLocaleString("en-US")} ${bytes === 1 ? "byte" : "bytes"}`;
+}
+

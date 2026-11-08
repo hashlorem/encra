@@ -157,3 +157,45 @@ export interface NmapScan {
   total_hosts: number;
   total_open_ports: number;
 }
+
+export interface EvidenceHashes {
+  sha256: string;
+  sha1: string;
+  md5: string;
+}
+
+/** A file in a case's evidence locker. Never its contents. */
+export interface EvidenceItem {
+  id: string;
+  project_id: string;
+  name: string;
+  source: string;
+  size: number;
+  hashes: EvidenceHashes;
+  added_at: string;
+  /** False when only the record is here (restored from a backup). */
+  stored: boolean;
+}
+
+export interface CustodyEvent {
+  seq: number;
+  action: string;
+  detail: string;
+  at: string;
+}
+
+export interface Custody {
+  events: CustodyEvent[];
+  status: { intact: boolean; problem: string | null };
+}
+
+export interface EvidenceCheck {
+  ok: boolean;
+  detail: string;
+}
+
+export interface EvidenceProgress {
+  name: string;
+  done: number;
+  total: number;
+}
