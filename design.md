@@ -2,7 +2,9 @@
 
 Replaces the "Terminal Authority" contract (Cobrypt, September 2026). The
 mockups this is drawn from live on the "Encra · Latent Print" page of the
-design canvas.
+design canvas; the themes and the screens added in November 2026 (import,
+check-up, ⌘K, case indicators and timeline) are on its "Encra · Next round"
+page.
 
 ## Product Truth
 
@@ -32,7 +34,8 @@ fingerprint is the one image, and it means "this is sealed".
 **1. The fingerprint is the seal.**
 - A synthetic inked print (never a real person's) appears on the lock
   screen, as the Seal control in the rail, and faintly on a few
-  record-level surfaces.
+  record-level surfaces. The lock screen and the Seal control show the
+  same print, whorl, loop or arch, chosen in Settings; whorl is the default.
 - It is never decoration on a working surface beyond that. One image,
   spent on one meaning.
 - Prints are rendered as a CSS mask over `--ink`, so one asset serves both
@@ -73,7 +76,11 @@ fingerprint is the one image, and it means "this is sealed".
 
 ### Colour
 
-Every value has a light and a dark counterpart. Nothing outside this table.
+Four palettes fill the same nine tokens, each in light and dark. Latent
+Print is the default; the others are picked in Settings and set as
+`data-palette` on the root element. Nothing outside these tables.
+
+Latent Print:
 
 | Token            | Light     | Dark      | Use |
 |------------------|-----------|-----------|-----|
@@ -87,12 +94,31 @@ Every value has a light and a dark counterpart. Nothing outside this table.
 | `--link`         | `#2B47B5` | `#A9B9F2` | Links, text buttons, focus ring |
 | `--danger`       | `#A1281E` | `#F0A39A` | Breaches, failed unlocks, delete, high/critical |
 
-Checked, not eyeballed (WCAG 2 contrast, worst surface first):
-`--ink-3` 4.67:1 light / 5.31:1 dark on `--paper-sunken`; every other text
-token is higher. `--rule` is non-text decoration and is exempt.
+The other palettes, light / dark:
+
+| Token            | Darkroom              | Cyanotype             | Evidence bag          |
+|------------------|-----------------------|-----------------------|-----------------------|
+| `--paper`        | `#F4EFE8` / `#120E0D` | `#EDF2F5` / `#0D2137` | `#DCCBAB` / `#1E1913` |
+| `--paper-raised` | `#FAF7F2` / `#1A1513` | `#F6F9FB` / `#132A43` | `#E6D8BD` / `#26201A` |
+| `--paper-sunken` | `#E7DFD3` / `#28201C` | `#DCE5EC` / `#1B3653` | `#CDB994` / `#332B22` |
+| `--ink`          | `#1D1715` / `#EFE3D8` | `#10213A` / `#EAF1F8` | `#1C1711` / `#EFE5D3` |
+| `--ink-2`        | `#3E3531` / `#D2C2B4` | `#2E4058` / `#C8D5E3` | `#3A3126` / `#D5C8B1` |
+| `--ink-3`        | `#655A54` / `#A8968A` | `#4F6075` / `#A3B5C9` | `#4E4335` / `#B2A38B` |
+| `--rule`         | `#DCD2C4` / `#3A2F29` | `#CCD8E2` / `#2B4763` | `#BFAA84` / `#4A3F32` |
+| `--link`         | `#9A4A06` / `#F5B35A` | `#0A5CA8` / `#F2D27C` | `#1D3C8F` / `#AFC6F2` |
+| `--danger`       | `#7E0E2A` / `#E97DA0` | `#A8261C` / `#FF9F94` | `#8A1A12` / `#F08C76` |
+
+Checked, not eyeballed: `npm run check:contrast` (`tools/contrast/check.mjs`)
+reads the tokens from `global.css` and fails if any text token is under
+4.5:1 on any of the three surfaces, or the primary button's label is, at
+rest or hovered, in any of the eight palette and mode pairs. The lowest
+today: Latent Print 4.67:1 light / 5.31:1 dark, Darkroom 4.74 / 5.63,
+Cyanotype 5.05 / 5.89, Evidence bag 4.90 / 5.63, all on `--paper-sunken`.
+`--rule` is non-text decoration and is exempt.
 
 The primary button is `--ink` on `--paper` text, so there is no separate
-accent colour. `--link` is the only hue in the interface.
+accent colour. Each palette has one hue, its `--link`; `--danger` is the
+only other colour, and only for danger.
 
 ### Typography
 
@@ -121,6 +147,14 @@ runtime.
 - Radius: 2px on buttons and the selected-row fill. Everything else is
   square.
 - Fields are an underline (`1.5px solid --ink`), not a box.
+
+### Density
+
+Comfortable is the default: list rows are 56px, with the name and its meta on
+two lines. Compact (`data-density="compact"` on the root) drops list rows,
+record facts and finding lines to 40px, the floor for dense rows, puts a
+row's name and meta on one line (the name keeps its width; the meta is cut
+first), and tightens entry and table padding. Nothing else changes.
 
 ### Motion
 
@@ -162,6 +196,19 @@ reading.
   the summary sentence, then history.
 - **Empty states.** One plain sentence saying what to do next. "No logins
   yet. Add your first one." Not cute, no prompt syntax.
+- **Findings** (check-up, indicators). A section title, then one line per
+  finding on hairlines, with its action at the end: Change, Review, Show
+  all, Copy. A long finding collapses to one summary line. Only "In a
+  breach" takes `--danger`.
+- **Case tabs.** Notes, Evidence, Indicators, Timeline: text tabs on a
+  hairline, the current one with a 2px `--ink` underline.
+- **⌘K palette.** Opens near the top of the window: one field, then results
+  grouped as Logins, Cases, Commands and Go to, with matched characters
+  underlined. The active result is the sunken fill and shows its keys
+  (↵ open, ⌘C password, ⌘⇧C code). ⌘F searches within the Vault.
+- **Import.** One dialog in steps: what's in the file (counts on hairlines,
+  names only), done (the export's path and an offer to delete it), confirm,
+  deleted.
 - **Icons.** Inline stroke SVG in `Icon.tsx`, 1.6px stroke, only where
   text alone is unclear. Brand icons from simpleicons.org, bundled.
 
@@ -183,7 +230,8 @@ reading.
   changes.
 - Icon-only buttons have an accessible name.
 - Targets at least 44px high, or 40px for text buttons inside dense rows.
-- Every page works in both themes before it ships.
+- Every page works in every palette, light and dark, and in compact
+  density, before it ships.
 
 ## Performance and Storage
 
@@ -205,6 +253,14 @@ reading.
   then read and written there (`src-tauri/src/commands/files.rs`).
 - No inline `style` attributes (the production CSP blocks them); dynamic
   values go through the CSSOM.
+- Copying: anything the page supplies goes through `copy_text`, and vault
+  fields through `copy_credential_field`. Both hide the value from clipboard
+  history and wipe it after 30 seconds and on seal. Case indicators and
+  evidence hashes aren't secrets and are meant for reports, so they stay on
+  the clipboard, but the page only names them (`copy_indicators`,
+  `copy_evidence_hash`) and Rust looks up the text.
+- Appearance (palette, mode, density, lock print) lives in `localStorage`,
+  is applied before the first paint, and is never secret.
 
 ## Finish Gate
 
@@ -213,7 +269,8 @@ Before a UI change ships:
 1. No card, pill, badge, numbered marker, uppercase micro-label or
    left-border callout crept back in.
 2. Nothing shown that the vault doesn't actually hold.
-3. Keyboard path, focus ring, both themes and the empty state all checked.
+3. Keyboard path, focus ring, every palette in both modes, compact density
+   and the empty state all checked, and `npm run check:contrast` passes.
 4. Motion confirms a state change or it goes.
 5. Would a person have made this, or does it look generated? If the
    latter, remove things until it doesn't.

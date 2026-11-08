@@ -814,3 +814,108 @@ fonts took another 271,656 bytes off before that.
 **Long lists.** The Vault list renders only the rows in view past 200
 logins; Nmap hosts and Activity load 100 at a time.
 
+
+---
+
+## 9. Fourth pass: import, check-up, palette, case views (November 2026)
+
+Four features and three themes were added. Each feature was built in Rust
+with tests first and its screen second. What matters for security:
+
+### 9.1 Importing from other password managers
+
+Exports from Chrome, Edge, Brave, Firefox, Apple Passwords, Bitwarden and
+1Password (and any CSV with a password column) are read and parsed in Rust.
+
+- **The file.** Picked with a dialog opened from Rust, refused above 20 MiB
+  before any of it is read, and parsed into memory that is wiped when
+  dropped. No more than 50,000 rows.
+- **The preview** shows names, usernames and counts. Passwords and 2FA keys
+  stay in Rust behind a one-time token that expires after 10 minutes and is
+  cleared when the vault seals.
+- **Adding** happens in one `BEGIN IMMEDIATE` transaction, with every field
+  sealed like any other login. A failure part-way leaves nothing behind
+  (tested by forcing one with a trigger). The token is cleared only after the
+  write succeeds, so a failed write can be retried: check, act, then consume.
+- **Duplicates.** Rows matching a login already in the vault (same name,
+  username and password), or repeated in the file, are skipped and counted.
+- **The export.** Afterwards Encra offers to delete it, since it holds every
+  password in plain text. The path is the one Rust read, never one from the
+  page, and it can only be deleted once, within 10 minutes, and not after
+  sealing. Deleting unlinks the file. On an SSD that is not a secure erase;
+  FileVault is what protects whatever is left, and the dialog says so.
+- The activity log records the count and the source app, not names.
+
+### 9.2 Vault check-up and remembered breach checks
+
+- **Shared passwords** are found by comparing HMAC-SHA256 values under a key
+  made for that one check and then dropped, so nothing comparable outlives
+  the call.
+- **The result is flags only:** which logins are breached, shared, weak or
+  over a year old. Never a password, its length or its makeup.
+- **Breach results are remembered.** Each one is sealed into
+  `credentials.breach_result`, bound to its row like any other field.
+  Changing a password clears it in the same `UPDATE`.
+- **`password_changed_at` is plaintext,** like `created_at`. Someone with the
+  database file can see when each password was last changed. That is new
+  metadata, accepted because the check-up needs it before the vault is
+  searched.
+- **Check all** sends one login at a time with a pause between them, stops if
+  the vault seals, keeps each result as it arrives, and cannot run twice at
+  once. As before, only the first five characters of each SHA-1 hash leave
+  the Mac.
+
+### 9.3 The ⌘K palette
+
+The search runs in Rust over names, usernames, case names and commands, and
+returns names and ids. Copying a password (⌘C) or a 2FA code (⌘⇧C) from it
+goes through the same per-field copy as the Vault page, so the value never
+reaches the page. Sealing from the palette is logged with its own fixed
+wording.
+
+### 9.4 Case indicators and timeline
+
+- Indicators (domains, URLs, IPs, emails, hashes, CVEs) are extracted in Rust
+  from the decrypted notes, evidence names, hashes and custody notes.
+  Defanged text is refanged first; domains are checked against a dated copy
+  of the IANA TLD list, and file-like TLDs (`.zip`, `.mov`) are marked as
+  possible domains. They are shown defanged by default.
+- CSV export goes through a save dialog opened from Rust and is written
+  owner-only. Cells that a spreadsheet would run as a formula are prefixed
+  so they stay text.
+- **Copying.** Before this pass, anything the page asked to copy was hidden
+  from clipboard history and wiped after 30 seconds. That is wrong for an
+  indicator list meant for a report, and a first draft added a command that
+  copied page-supplied text without either. Review caught that a
+  compromised page could use it to leave a revealed password in clipboard
+  history, so it was replaced before it shipped: the page now names an
+  indicator or a hash (`copy_indicators`, `copy_evidence_hash`) and Rust
+  looks up the text. Text the page supplies still only goes through
+  `copy_text`.
+
+### 9.5 Smaller changes
+
+- **QR images.** "Choose image…" used the webview's file input, so a QR image
+  (which holds the 2FA key) passed through the page. Rust now opens the
+  dialog and reads the file, under the same 25 MiB limit.
+- **Appearance** (palette, light or dark, density, lock print) is stored in
+  `localStorage` and applied before the lock screen draws. None of it is
+  secret.
+
+### 9.6 Verification
+
+- `cargo test`: 112 passed, 3 ignored (the two live-network HIBP checks and
+  the 50,000-entry benchmark), against real database files. New tests cover
+  each import format, all-or-nothing import with a forced failure, reopening
+  after import, token expiry and seal clearing, the check-up report and its
+  update rules, palette ranking, indicators and timeline from a real case,
+  the copy lookup, the check-all guard and plain clipboard copies.
+- `cargo clippy --all-targets -- -D warnings`: clean in debug and release.
+  `npx tsc --noEmit` and `npm run build`: clean.
+- `npm run check:contrast`: all eight palette and mode pairs pass 4.5:1.
+- The new screens were rendered from the real frontend in headless Chrome
+  against a fake backend and checked from screenshots: all four palettes,
+  light and dark, compact density, and the 760 by 600 minimum window. That
+  checks layout, not behaviour against the real backend. The release build
+  is installed with the vault unchanged (48 log entries, 2 logins); its new
+  screens have not been tried by hand yet.
