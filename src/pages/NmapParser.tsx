@@ -1,14 +1,10 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { open } from "@tauri-apps/plugin-dialog";
-import { readTextFile } from "@tauri-apps/plugin-fs";
+import { listen } from "@tauri-apps/api/event";
 import { describeError } from "../lib/errors";
-import type { NmapScan, Project } from "../lib/types";
+import type { NmapScan, OpenedScan, Project } from "../lib/types";
 
-/** Basename that works for both POSIX and Windows paths. */
-function baseName(path: string): string {
-  return path.split(/[\\/]/).pop() || "scan.xml";
-}
+const HOSTS_PER_PAGE = 100;
 
 interface ProjectOption {
   id: string;
@@ -25,6 +21,8 @@ function NmapParser({ onClose }: { onClose: () => void }) {
   const [saveMsg, setSaveMsg] = useState("");
   const [saving, setSaving] = useState(false);
   const [dragOver, setDragOver] = useState(false);
+  // Big scans render a page of hosts at a time, so the page stays light.
+  const [shown, setShown] = useState(HOSTS_PER_PAGE);
 
   useEffect(() => {
     let cancelled = false;
@@ -41,62 +39,40 @@ function NmapParser({ onClose }: { onClose: () => void }) {
     };
   }, []);
 
-  const parseContent = async (content: string, name: string) => {
+  const showScan = (opened: OpenedScan | null) => {
+    if (!opened) return;
+    setShown(HOSTS_PER_PAGE);
+    setScan(opened.scan);
+    setFileName(opened.name);
+    setSaveMsg("");
+    setError("");
+  };
+
+  /** Rust opens the file (picked or dropped), reads and parses it. */
+  const openWith = useCallback(async (command: "open_nmap_file" | "open_dropped_nmap") => {
+    setError("");
     setLoading(true);
     try {
-      const result = await invoke<NmapScan>("parse_nmap", { xmlContent: content });
-      setScan(result);
-      setFileName(name);
-      setSaveMsg("");
-      setError("");
+      showScan(await invoke<OpenedScan | null>(command));
     } catch (err) {
-      setError(describeError(err, "Could not parse that scan file."));
+      setError(describeError(err, "Could not read that file."));
     } finally {
       setLoading(false);
     }
+  }, []);
+
+  const handleFile = () => {
+    if (!loading) void openWith("open_nmap_file");
   };
 
-  const handleFile = async () => {
-    if (loading) return;
-    setError("");
-    try {
-      const filePath = await open({
-        filters: [{ name: "Nmap XML", extensions: ["xml"] }],
-        multiple: false,
-      });
-      if (!filePath) return;
-      const content = await readTextFile(filePath as string);
-      await parseContent(content, baseName(filePath as string));
-    } catch (err) {
-      setError(describeError(err, "Could not read that file."));
-      setLoading(false);
-    }
-  };
-
-  const handleDrop = async (event: React.DragEvent) => {
-    event.preventDefault();
-    setDragOver(false);
-    if (loading) return;
-
-    const file = event.dataTransfer.files[0];
-    if (!file) return;
-    if (!file.name.toLowerCase().endsWith(".xml")) {
-      // Previously a non-XML drop was silently ignored.
-      setError("Only Nmap XML files can be parsed.");
-      return;
-    }
-
-    setError("");
-    try {
-      // Reading the whole file into memory is bounded on the backend by the
-      // scan-size cap, which rejects anything oversized before parsing.
-      const text = await file.text();
-      await parseContent(text, file.name);
-    } catch (err) {
-      setError(describeError(err, "Could not read that file."));
-      setLoading(false);
-    }
-  };
+  useEffect(() => {
+    const dropped = listen("files-dropped", () => void openWith("open_dropped_nmap"));
+    const dragging = listen<boolean>("files-drag", (event) => setDragOver(event.payload));
+    return () => {
+      void dropped.then((stop) => stop());
+      void dragging.then((stop) => stop());
+    };
+  }, [openWith]);
 
   const saveToJournal = async () => {
     if (!scan || !saveProject || saving) return;
@@ -131,28 +107,20 @@ function NmapParser({ onClose }: { onClose: () => void }) {
   };
 
   return (
-    <div
-      className="page"
-      onDragOver={(event) => {
-        event.preventDefault();
-        setDragOver(true);
-      }}
-      onDragLeave={() => setDragOver(false)}
-      onDrop={(event) => void handleDrop(event)}
-    >
+    <div className="page">
       <button className="btn-text back" onClick={onClose}>← Toolbox</button>
       <header className="page-head">
         <div>
           <h1 className="title-l">Nmap parser</h1>
           <p className="lead">Reads Nmap’s XML output (<span className="mono">-oX</span>) on this machine.</p>
         </div>
-        {scan && <button className="btn-outline" onClick={() => void handleFile()} disabled={loading}>Open another file</button>}
+        {scan && <button className="btn-outline" onClick={handleFile} disabled={loading}>Open another file</button>}
       </header>
 
       {!scan && (
         <div className={`dropzone${dragOver ? " is-over" : ""}`}>
           <p className="lead">{loading ? "Reading the scan…" : "Drop an Nmap XML file here, or choose one."}</p>
-          <button className="btn-outline" onClick={() => void handleFile()} disabled={loading}>Choose a file</button>
+          <button className="btn-outline" onClick={handleFile} disabled={loading}>Choose a file</button>
         </div>
       )}
 
@@ -184,7 +152,7 @@ function NmapParser({ onClose }: { onClose: () => void }) {
           )}
 
           <div>
-            {scan.hosts.map((host) => {
+            {scan.hosts.slice(0, shown).map((host) => {
               const open = host.ports.filter((port) => port.state === "open").length;
               return (
                 <section key={`${host.ip}-${host.hostname ?? ""}`} className="host">
@@ -217,6 +185,16 @@ function NmapParser({ onClose }: { onClose: () => void }) {
               );
             })}
           </div>
+
+          {scan.hosts.length > shown && (
+            <div className="actions">
+              <span className="meta">
+                Showing {shown.toLocaleString("en-US")} of {scan.hosts.length.toLocaleString("en-US")} hosts.
+              </span>
+              <button className="btn-outline" onClick={() => setShown((n) => n + HOSTS_PER_PAGE)}>Show 100 more</button>
+              <button className="btn-text" onClick={() => setShown(scan.hosts.length)}>Show all</button>
+            </div>
+          )}
         </>
       )}
     </div>

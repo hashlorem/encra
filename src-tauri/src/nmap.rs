@@ -29,7 +29,7 @@ pub struct NmapScan {
 /// Hard ceiling on the XML document we accept. Parsing holds the whole document
 /// in memory, so an accidental or hostile multi-gigabyte file is rejected up
 /// front rather than allowed to exhaust the process.
-const MAX_XML_BYTES: usize = 32 * 1024 * 1024;
+pub const MAX_XML_BYTES: usize = 32 * 1024 * 1024;
 const MAX_HOSTS: usize = 100_000;
 const MAX_PORTS_PER_HOST: usize = 10_000;
 

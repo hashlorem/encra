@@ -90,6 +90,8 @@ export interface KBInput {
 
 export interface ActivityEntry {
   id: string;
+  /** Position in the log's chain; the cursor for loading older entries. */
+  seq: number | null;
   action: string;
   detail: string;
   timestamp: string;
@@ -135,6 +137,12 @@ export interface AgentStatus {
 export interface ActivityLog {
   entries: ActivityEntry[];
   chain: ChainStatus;
+  has_more: boolean;
+}
+
+export interface ActivityPage {
+  entries: ActivityEntry[];
+  has_more: boolean;
 }
 
 export interface NmapPort {
@@ -199,3 +207,10 @@ export interface EvidenceProgress {
   done: number;
   total: number;
 }
+
+/** A scan Rust opened and parsed, with its file name. */
+export interface OpenedScan {
+  name: string;
+  scan: NmapScan;
+}
+

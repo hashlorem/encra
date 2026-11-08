@@ -752,12 +752,13 @@ writing an encrypted copy to `evidence/<id>.enc`. The original is only read.
   the value and prints it, the caller sees it. The dialog shows what will run;
   it cannot judge it.
 - **Command output is not masked.**
-- **`tauri-plugin-fs` is still exposed** (see 7.12).
-- **No list virtualisation** (see 7.12).
+- Closed since: `tauri-plugin-fs` is gone and the long-list item is done
+  (see 8.10).
 
 ### 8.9 Verification
 
-- `cargo test`: 83 passed, 2 ignored (the live-network HIBP checks).
+- `cargo test`: 89 passed, 3 ignored (the two live-network HIBP checks and
+  the 50,000-entry activity log benchmark).
   The tests run against real database files and close and reopen them where
   persistence matters. They cover format 3 migration and rollback, chain
   tampering, backup envelopes, the full agent flow over a real socket (approve,
@@ -771,4 +772,45 @@ writing an encrypted copy to `evidence/<id>.enc`. The original is only read.
   tested by hand on macOS, including lock and unlock, auto-lock, and agent
   requests. QR setup from a real service had not yet been tried when this was
   written.
+
+### 8.10 Optimising and closing the last open items
+
+**The webview lost its file access.** `tauri-plugin-fs` let the webview read
+text files under Application Support, Downloads and Desktop, and write to the
+last two. Only backups and the Nmap parser used it. Now every file is picked
+with a dialog opened from Rust, or dropped on the window and claimed in Rust
+(`commands/files.rs`), and read or written there:
+
+- Backup export opens the save dialog from Rust, seals the backup and writes
+  it owner-only through a temporary file, so a failed write leaves nothing.
+- Backup import reads the picked file in Rust and hands the page a one-time
+  token. The token is claimed once, expires after 10 minutes and is cleared
+  when the vault seals; the file's contents never reach the webview.
+- The Nmap parser opens and reads scans in Rust. Its old command, which took
+  raw XML from the page, is gone.
+- The fs plugin and the webview's dialog permissions are removed. The
+  webview's capabilities are now `core:default` and three window calls.
+
+**The CSP no longer allows the breach API.** Only Rust calls it, so
+`connect-src` is `'self'`.
+
+**The activity log was quadratic.** It had no index on its sequence number,
+so every new entry scanned the table and sealing updated row by row with a
+scan each. Measured on 50,000 entries in a release build: writing them went
+from 21.1 s to 0.21 s, sealing them from about 38 s to 0.19 s, and one page of
+the Activity view from 5 ms to 0.5 ms. Sealing one new entry still re-verifies
+the whole chain: 87 ms at 50,000 entries, about 0.1 ms at today's size. A
+benchmark test (`cargo test --release -- --ignored activity_log_scales`)
+keeps the numbers honest; an incremental check was not added, because it
+would put a second code path into the tamper chain for a log that is years
+away from needing it.
+
+**Smaller, faster release builds.** Link-time optimisation, one codegen unit
+and stripped symbols. Panics still unwind, which the QR decoder relies on.
+Measured on the same code: the release binary went from 20,827,432 to
+12,457,584 bytes (40% smaller). Dropping the fs plugin and the unused .woff
+fonts took another 271,656 bytes off before that.
+
+**Long lists.** The Vault list renders only the rows in view past 200
+logins; Nmap hosts and Activity load 100 at a time.
 

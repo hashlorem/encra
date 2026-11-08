@@ -9,6 +9,8 @@ use crate::util::{os_rng, uuid_v4};
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct ActivityEntry {
     pub id: String,
+    /// Position in the chain; the cursor for loading older entries.
+    pub seq: Option<i64>,
     pub action: String,
     pub detail: String,
     pub timestamp: String,
@@ -41,6 +43,10 @@ pub fn init_activity_table(conn: &Connection) -> Result<(), String> {
     conn.execute("ALTER TABLE recovery_codes ADD COLUMN wrapped_dek TEXT NOT NULL DEFAULT ''", []).ok();
     // Format 3: position in the chain, and the entry's HMAC once sealed.
     conn.execute("ALTER TABLE activity_log ADD COLUMN seq INTEGER", []).ok();
+    // Every write asks for MAX(seq), sealing updates by seq, and the chain and
+    // the Activity pages read in seq order: without this each of those scans
+    // the whole log, which made writing a long log quadratic.
+    conn.execute("CREATE INDEX IF NOT EXISTS activity_log_seq ON activity_log (seq)", []).map_err(|e| e.to_string())?;
     conn.execute("ALTER TABLE activity_log ADD COLUMN mac TEXT", []).ok();
 
     Ok(())

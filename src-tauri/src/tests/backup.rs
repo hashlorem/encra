@@ -236,3 +236,18 @@ fn test_backup_prepare_creates_missing_project() {
 
     std::fs::remove_dir_all(dir).unwrap();
 }
+
+#[test]
+fn test_backup_file_round_trip_through_disk() {
+    // The path export and import now take: sealed, written owner-only by
+    // Rust, read back by Rust, opened with the password.
+    let dir = migration_test_dir("backup-file");
+    let path = dir.join("encra-backup-2026-11-08.encra");
+    let json = r#"{"version":"1.1","credentials":[],"projects":[],"journal_entries":[],"kb_entries":[]}"#;
+    let sealed = seal_backup(json, "backup-pass").unwrap();
+    crate::commands::files::write_private(&path, sealed.as_bytes()).unwrap();
+    let read = crate::commands::files::read_text_capped(&path, 1024 * 1024).unwrap();
+    assert_eq!(open_backup(&read, "backup-pass").unwrap().as_str(), json);
+    assert!(open_backup(&read, "wrong-pass").is_err());
+    std::fs::remove_dir_all(dir).unwrap();
+}

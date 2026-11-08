@@ -107,8 +107,9 @@ accent colour. `--link` is the only hue in the interface.
 | 56px | Newsreader | Lock and record titles |
 
 Line height 1.5 for text, 1.05 for the two display sizes. Weights: 400,
-500, 600 only. Fonts are self-hosted (Latin subset) through Fontsource
-packages; nothing is fetched at runtime.
+500, 600 only. Fonts are self-hosted (Latin subset, woff2 only) from the
+Fontsource packages through `src/styles/fonts.css`; nothing is fetched at
+runtime.
 
 ### Layout
 
@@ -188,17 +189,20 @@ reading.
 
 - No new frontend dependency without checking the `vite build` output.
   Fontsource packages are the accepted exception for self-hosted fonts.
-- Lists virtualise past ~200 rows (still outstanding from the September
-  audit).
+- Lists virtualise past ~200 rows: `VirtualList` for fixed-height rows
+  (the Vault list), pages of 100 for variable-height ones (Nmap hosts,
+  Activity).
 - The lock screen renders before any database read.
 - Secrets stay in Rust. The webview gets metadata for lists and asks for
   one field at a time; copying happens in Rust.
 
 ## Implementation Constraints
 
-- CSP stays self-only for scripts, styles and fonts. The only network call
-  is the HIBP range query.
-- Tauri capabilities stay scoped to `$APPDATA`, `$DOWNLOAD`, `$DESKTOP`.
+- CSP stays self-only for scripts, styles, fonts and connections. The only
+  network call is the HIBP range query, and Rust makes it, not the webview.
+- The webview has no file system or dialog access. Files are picked with
+  dialogs opened from Rust, or dropped on the window and claimed in Rust,
+  then read and written there (`src-tauri/src/commands/files.rs`).
 - No inline `style` attributes (the production CSP blocks them); dynamic
   values go through the CSSOM.
 

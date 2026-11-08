@@ -3,7 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { EmptyState } from "../components/EmptyState";
 import { describeError } from "../lib/errors";
 import { dayLabel, formatTimeExact, parseStored } from "../lib/format";
-import type { ActivityEntry, ActivityLog, ChainStatus } from "../lib/types";
+import type { ActivityEntry, ActivityLog, ActivityPage, ChainStatus } from "../lib/types";
 
 const ACTION_LABELS: Record<string, string> = {
   unlock: "Unlocked",
@@ -53,12 +53,15 @@ function Activity() {
   const [chain, setChain] = useState<ChainStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState("");
+  const [hasMore, setHasMore] = useState(false);
+  const [loadingOlder, setLoadingOlder] = useState(false);
 
   const load = useCallback(async () => {
     try {
       const log = await invoke<ActivityLog>("get_activity_log");
       setEntries(log.entries);
       setChain(log.chain);
+      setHasMore(log.has_more);
       setError("");
     } catch (err) {
       setError(describeError(err, "Could not read the activity log."));
@@ -71,6 +74,21 @@ function Activity() {
     void load();
   }, [load]);
 
+  const loadOlder = async () => {
+    const oldest = entries[entries.length - 1]?.seq;
+    if (loadingOlder || oldest == null) return;
+    setLoadingOlder(true);
+    try {
+      const page = await invoke<ActivityPage>("get_activity_older", { beforeSeq: oldest });
+      setEntries((current) => [...current, ...page.entries]);
+      setHasMore(page.has_more);
+    } catch (err) {
+      setError(describeError(err, "Could not read older entries."));
+    } finally {
+      setLoadingOlder(false);
+    }
+  };
+
   const days = useMemo(() => groupByDay(entries), [entries]);
   const failures = entries.filter((entry) => entry.action === "unlock_failed").length;
 
@@ -80,8 +98,8 @@ function Activity() {
         <div>
           <h1 className="title-l">Activity</h1>
           <p className="lead">
-            Everything that touched the vault on this machine, newest first. Showing the latest {entries.length}{" "}
-            {entries.length === 1 ? "entry" : "entries"}.
+            Everything that touched the vault on this machine, newest first.
+            {hasMore && ` Showing the latest ${entries.length}.`}
             {failures > 0 && (
               <>
                 {" "}
@@ -133,6 +151,14 @@ function Activity() {
           </div>
         </section>
       ))}
+
+      {hasMore && (
+        <div className="actions">
+          <button className="btn-outline" onClick={() => void loadOlder()} disabled={loadingOlder}>
+            {loadingOlder ? "Reading…" : "Show older"}
+          </button>
+        </div>
+      )}
     </div>
   );
 }

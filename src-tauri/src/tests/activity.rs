@@ -75,3 +75,61 @@ fn test_activity_ids_do_not_collide() {
     let total: i64 = conn.query_row("SELECT COUNT(*) FROM activity_log", [], |r| r.get(0)).unwrap();
     assert_eq!(total, 500, "every audit entry must survive");
 }
+
+#[test]
+fn test_activity_pages_newest_first_without_gaps_or_repeats() {
+    let conn = Connection::open_in_memory().unwrap();
+    activity::init_activity_table(&conn).unwrap();
+    for i in 0..250 {
+        activity::log_action(&conn, "test", &format!("entry {i}"));
+    }
+    let (first, more) = crate::commands::activity::page(&conn, None).unwrap();
+    assert_eq!((first.len(), more), (100, true));
+    assert_eq!(first[0].detail, "entry 249", "newest first");
+    let (second, more) = crate::commands::activity::page(&conn, first.last().unwrap().seq).unwrap();
+    assert_eq!((second.len(), more), (100, true));
+    let (third, more) = crate::commands::activity::page(&conn, second.last().unwrap().seq).unwrap();
+    assert_eq!((third.len(), more), (50, false));
+    assert_eq!(third.last().unwrap().detail, "entry 0");
+
+    let seqs: Vec<i64> = first.iter().chain(&second).chain(&third).map(|e| e.seq.unwrap()).collect();
+    assert!(seqs.windows(2).all(|w| w[0] > w[1]), "strictly older on every page");
+    assert_eq!(seqs.len(), 250);
+}
+
+
+#[test]
+#[ignore = "benchmark: cargo test --release -- --ignored activity_log_scales"]
+fn test_activity_log_scales_to_50k_entries() {
+    use std::time::Instant;
+    let conn = Connection::open_in_memory().unwrap();
+    conn.execute_batch("CREATE TABLE vault_config (key TEXT PRIMARY KEY, value TEXT NOT NULL)").unwrap();
+    activity::init_activity_table(&conn).unwrap();
+    let dek = [7u8; 32];
+
+    let start = Instant::now();
+    conn.execute_batch("BEGIN").unwrap();
+    for i in 0..50_000 {
+        activity::log_action(&conn, "test", &format!("entry {i}"));
+    }
+    conn.execute_batch("COMMIT").unwrap();
+    eprintln!("writing 50,000 entries: {:?}", start.elapsed());
+
+    let start = Instant::now();
+    activity::seal_pending(&conn, &dek).unwrap();
+    eprintln!("sealing all 50,000 entries: {:?}", start.elapsed());
+
+    let start = Instant::now();
+    activity::log_action(&conn, "test", "one more");
+    eprintln!("logging one entry on a 50,000-entry log: {:?}", start.elapsed());
+
+    let start = Instant::now();
+    activity::seal_pending(&conn, &dek).unwrap();
+    eprintln!("sealing that one entry (verifies the whole chain): {:?}", start.elapsed());
+
+    let start = Instant::now();
+    let (page, _) = crate::commands::activity::page(&conn, Some(25_000)).unwrap();
+    eprintln!("one page from the middle: {:?}", start.elapsed());
+    assert_eq!(page.len(), 100);
+    assert!(activity::verify_chain(&conn, &dek).unwrap().intact);
+}

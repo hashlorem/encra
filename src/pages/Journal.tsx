@@ -73,7 +73,7 @@ function Journal() {
   // Files dropped on the window go to the open case's evidence. Rust keeps
   // the paths; this only says a drop happened.
   useEffect(() => {
-    const stop = listen<number>("evidence-dropped", () => {
+    const stop = listen<number>("files-dropped", () => {
       setTab("evidence");
       setDropToken((n) => n + 1);
     });

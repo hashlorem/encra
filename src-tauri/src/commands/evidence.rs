@@ -2,9 +2,9 @@
 //! handled here, never from the webview.
 
 use std::path::PathBuf;
-use std::sync::Mutex;
 use tauri::{Emitter, Manager};
 
+use crate::commands::files::take_dropped;
 use crate::db::*;
 use crate::util::check_field;
 use crate::vault::AppState;
@@ -12,13 +12,6 @@ use crate::evidence;
 
 /// Where evidence files live, beside the vault.
 pub(crate) struct EvidenceDir(pub(crate) PathBuf);
-
-/// Files dropped on the window, held in Rust so the webview never supplies a
-/// path. A case claims them shortly after the drop or they are forgotten.
-#[derive(Default)]
-pub(crate) struct DroppedFiles(pub(crate) Mutex<Option<(std::time::Instant, Vec<PathBuf>)>>);
-
-pub(crate) const DROP_CLAIM_WINDOW: std::time::Duration = std::time::Duration::from_secs(30);
 
 #[derive(Clone, serde::Serialize)]
 pub(crate) struct EvidenceProgress {
@@ -79,11 +72,10 @@ pub(crate) async fn add_evidence(app: tauri::AppHandle, project_id: String, note
 /// Add the files most recently dropped on the window.
 #[tauri::command]
 pub(crate) async fn add_dropped_evidence(app: tauri::AppHandle, project_id: String, note: String) -> Result<Vec<evidence::Item>, String> {
-    let dropped = app.state::<DroppedFiles>().0.lock().map_err(|e| e.to_string())?.take();
-    let paths = match dropped {
-        Some((at, paths)) if at.elapsed() < DROP_CLAIM_WINDOW => paths,
-        _ => return Ok(Vec::new()),
-    };
+    let paths = take_dropped(&app)?;
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
     add_evidence_files(app, project_id, paths, note).await
 }
 

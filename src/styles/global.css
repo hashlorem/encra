@@ -555,6 +555,22 @@ kbd,
   font-weight: 600;
 }
 
+/* A windowed list (VirtualList past ~200 rows): rows share one height so
+   the spacers above and below can stand in for the ones not drawn. */
+.virtual-spacer {
+  pointer-events: none;
+}
+
+.rows.is-virtual .row {
+  height: 56px;
+}
+
+.rows.is-virtual .row-copy .meta {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .row-copy {
   display: flex;
   flex-direction: column;

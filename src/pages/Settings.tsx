@@ -1,7 +1,5 @@
 import { useEffect, useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { save, open } from "@tauri-apps/plugin-dialog";
-import { writeTextFile, readTextFile } from "@tauri-apps/plugin-fs";
 import { useTheme, type Theme } from "../lib/ThemeContext";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
@@ -29,7 +27,7 @@ function Settings() {
   const [importPassword, setImportPassword] = useState("");
   const [importMsg, setImportMsg] = useState("");
   const [importing, setImporting] = useState(false);
-  const [pendingImport, setPendingImport] = useState<{ contents: string } | null>(null);
+  const [pendingImport, setPendingImport] = useState<{ token: string; name: string } | null>(null);
 
   const [recoveryCodes, setRecoveryCodes] = useState<string[] | null>(null);
   const [hasSafetyCopy, setHasSafetyCopy] = useState(false);
@@ -120,19 +118,13 @@ function Settings() {
       return;
     }
     setExporting(true);
-    setBackupMsg("Encrypting…");
+    setBackupMsg("");
     try {
-      const encrypted = await invoke<string>("export_backup", { backupPassword });
-      const filePath = await save({
-        defaultPath: `encra-backup-${new Date().toISOString().slice(0, 10)}.encra`,
-        filters: [{ name: "Encra Backup", extensions: ["encra"] }],
-      });
-      if (filePath) {
-        await writeTextFile(filePath, encrypted);
-        setBackupMsg("Backup saved.");
+      // Rust opens the save dialog, seals the backup and writes the file.
+      const name = await invoke<string | null>("export_backup", { backupPassword });
+      if (name) {
+        setBackupMsg(`Saved ${name}.`);
         setBackupPassword("");
-      } else {
-        setBackupMsg("");
       }
     } catch (error) {
       setBackupMsg(describeError(error, "Could not export a backup. Nothing was written."));
@@ -149,15 +141,10 @@ function Settings() {
     }
     setImportMsg("");
     try {
-      const filePath = await open({
-        filters: [{ name: "Encra Backup", extensions: ["encra", "cobrypt", "kpt"] }],
-        multiple: false,
-      });
-      if (!filePath) return;
-      const contents = await readTextFile(filePath as string);
-      // Import adds to the current vault rather than replacing it, so confirm
-      // before touching stored data.
-      setPendingImport({ contents });
+      // Rust opens the file dialog and reads the file; the page only gets a
+      // token for it. Import adds to the vault, so confirm first.
+      const picked = await invoke<{ token: string; name: string } | null>("pick_backup_file");
+      if (picked) setPendingImport(picked);
     } catch (error) {
       setImportMsg(describeError(error, "Could not read that backup file."));
     }
@@ -167,12 +154,7 @@ function Settings() {
     if (!pendingImport || importing) return;
     setImporting(true);
     try {
-      await invoke("import_backup", {
-        // The backend parameter is `bundled`; sending the wrong key here made
-        // every import fail before this was fixed.
-        bundled: pendingImport.contents,
-        backupPassword: importPassword,
-      });
+      await invoke("import_backup", { token: pendingImport.token, backupPassword: importPassword });
       setImportMsg("Import complete.");
       setImportPassword("");
       setPendingImport(null);
@@ -461,7 +443,7 @@ function Settings() {
 
       {pendingImport && (
         <ConfirmDialog
-          title="Restore this backup?"
+          title={`Restore ${pendingImport.name}?`}
           message="Its entries are added to this vault. Nothing already here is replaced or removed."
           confirmLabel="Restore"
           busy={importing}

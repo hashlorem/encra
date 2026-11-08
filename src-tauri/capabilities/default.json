@@ -1,21 +1,13 @@
 {
   "identifier": "default",
-  "description": "Default capabilities for Encra",
-  "windows": ["main"],
+  "description": "Default capabilities for Encra. The webview gets no file system or dialog access: files are picked and read in Rust.",
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "core:window:allow-center",
     "core:window:allow-set-resizable",
-    "core:window:allow-set-size",
-    "dialog:allow-open",
-    "dialog:allow-save",
-    {
-      "identifier": "fs:allow-read-text-file",
-      "allow": [{ "path": "$APPDATA/**" }, { "path": "$DOWNLOAD/**" }, { "path": "$DESKTOP/**" }]
-    },
-    {
-      "identifier": "fs:allow-write-text-file",
-      "allow": [{ "path": "$DOWNLOAD/**" }, { "path": "$DESKTOP/**" }]
-    }
+    "core:window:allow-set-size"
   ]
 }

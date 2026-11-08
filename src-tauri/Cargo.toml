@@ -6,7 +6,6 @@ edition = "2021"
 [dependencies]
 tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
-tauri-plugin-fs = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
@@ -48,6 +47,13 @@ tauri-build = { version = "2", features = [] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Release builds: whole-program optimisation and no symbol tables. Panics
+# still unwind: qr.rs catches a QR decoder panic and reports a failed read.
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
 
 # Argon2 at 256 MiB is painfully slow unoptimised. Optimise the hashing crates
 # even in dev builds, so dev unlocks and the test suite run the real settings.

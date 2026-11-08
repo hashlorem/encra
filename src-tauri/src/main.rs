@@ -27,7 +27,9 @@ use tauri::{Emitter, Manager};
 
 use clipboard::ClipboardGuard;
 use commands::agent::{agent_access_enabled, show_main_window, show_waiting_in_menu_bar, AGENT_TRAY, TRAY_IDLE};
-use commands::evidence::{DroppedFiles, EvidenceDir};
+use commands::backup::PendingBackup;
+use commands::evidence::EvidenceDir;
+use commands::files::DroppedFiles;
 use commands::{activity as activity_cmd, agent as agent_cmd, backup as backup_cmd, cases, evidence as evidence_cmd, lifecycle, logins, recovery, toolbox};
 use paths::{restrict_permissions, vault_path};
 use vault::AppState;
@@ -44,7 +46,6 @@ fn main() {
 
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
-        .plugin(tauri_plugin_fs::init())
         .setup(|app| {
             let db_path = vault_path(app.handle()).map_err(std::io::Error::other)?;
             // Fail loudly instead of panicking: a corrupt or unwritable data
@@ -70,6 +71,7 @@ fn main() {
             }
             app.manage(EvidenceDir(evidence_dir));
             app.manage(DroppedFiles::default());
+            app.manage(PendingBackup::default());
 
             // Enable foreign keys
             conn.execute_batch("PRAGMA foreign_keys = ON;")
@@ -138,17 +140,7 @@ fn main() {
             tray.set_visible(enabled)?;
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::DragDrop(tauri::DragDropEvent::Drop { paths, .. }) = event {
-                if paths.is_empty() {
-                    return;
-                }
-                if let Ok(mut dropped) = window.state::<DroppedFiles>().0.lock() {
-                    *dropped = Some((std::time::Instant::now(), paths.clone()));
-                }
-                let _ = window.emit("evidence-dropped", paths.len());
-            }
-        })
+        .on_window_event(commands::files::window_event)
         .invoke_handler(tauri::generate_handler![
             logins::list_credentials, logins::get_credential, logins::reveal_password, logins::get_totp,
             logins::copy_credential_field, logins::copy_text, logins::check_credential_breach,
@@ -163,9 +155,9 @@ fn main() {
             evidence_cmd::list_evidence, evidence_cmd::add_evidence, evidence_cmd::add_dropped_evidence,
             evidence_cmd::verify_evidence, evidence_cmd::export_evidence, evidence_cmd::evidence_custody,
             evidence_cmd::add_evidence_note, evidence_cmd::delete_evidence,
-            toolbox::parse_nmap, toolbox::add_kb_entry, toolbox::get_kb_entries, toolbox::delete_kb_entry,
-            backup_cmd::export_backup, backup_cmd::import_backup,
-            activity_cmd::get_activity_log,
+            toolbox::open_nmap_file, toolbox::open_dropped_nmap, toolbox::add_kb_entry, toolbox::get_kb_entries, toolbox::delete_kb_entry,
+            backup_cmd::export_backup, backup_cmd::pick_backup_file, backup_cmd::import_backup,
+            activity_cmd::get_activity_log, activity_cmd::get_activity_older,
             recovery::generate_recovery_codes, recovery::reset_master_password, recovery::verify_master_password,
         ])
         .run(tauri::generate_context!());

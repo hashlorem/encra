@@ -3,6 +3,7 @@ import { invoke } from "@tauri-apps/api/core";
 import { ModalOverlay } from "../components/ModalOverlay";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyState } from "../components/EmptyState";
+import { VirtualList } from "../components/VirtualList";
 import { Print } from "../components/Print";
 import { describeError } from "../lib/errors";
 import { formatDate } from "../lib/format";
@@ -337,31 +338,32 @@ function Vault() {
           <EmptyState message={search ? "Nothing matches that search." : "No logins yet."} />
         )}
 
-        <ul className="rows stagger">
-          {filtered.map((c) => {
+        <VirtualList
+          className="rows"
+          items={filtered}
+          getKey={(c) => c.id}
+          renderRow={(c) => {
             const result = breaches[c.id];
             const breached = result?.state === "done" && result.count > 0;
             return (
-              <li key={c.id}>
-                <button
-                  className="row"
-                  aria-current={c.id === selectedId ? "true" : undefined}
-                  onClick={() => setSelectedId(c.id)}
-                >
-                  <span className="row-copy">
-                    <span className="row-name">{c.service}</span>
-                    {c.username && <span className="meta">{c.username}</span>}
-                  </span>
-                  {breached ? (
-                    <span className="row-note is-danger">in a breach</span>
-                  ) : (
-                    c.has_totp && <span className="row-note">2FA</span>
-                  )}
-                </button>
-              </li>
+              <button
+                className="row"
+                aria-current={c.id === selectedId ? "true" : undefined}
+                onClick={() => setSelectedId(c.id)}
+              >
+                <span className="row-copy">
+                  <span className="row-name">{c.service}</span>
+                  {c.username && <span className="meta">{c.username}</span>}
+                </span>
+                {breached ? (
+                  <span className="row-note is-danger">in a breach</span>
+                ) : (
+                  c.has_totp && <span className="row-note">2FA</span>
+                )}
+              </button>
             );
-          })}
-        </ul>
+          }}
+        />
       </section>
 
       <div className="split-main">
