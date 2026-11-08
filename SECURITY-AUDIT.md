@@ -710,7 +710,39 @@ clipboard, the clipboard is cleared, because the image holds the secret.
 Export QR codes from authenticator apps and counter-based (HOTP) codes are
 refused.
 
-### 8.7 Still open
+### 8.7 Evidence locker
+
+Each case can hold evidence files. On intake Encra reads the file once,
+taking SHA-256, SHA-1 and MD5 (the last two only to match other tools) while
+writing an encrypted copy to `evidence/<id>.enc`. The original is only read.
+
+- **Storage.** Every file has its own random key, sealed in the database
+  under the vault key. The copy is encrypted in 1 MiB AES-256-GCM chunks.
+  Each chunk's nonce holds its position and a last-chunk flag, and its
+  associated data names the item, so flipping a byte, reordering chunks,
+  cutting the file short or moving it to another item all fail to decrypt.
+  Only one chunk is in memory at a time.
+- **Intake order.** The copy is written to a hidden staging file first, then
+  moved into place inside the database transaction that records it. A
+  failure rolls back and deletes the file. A crash after the move but before
+  the commit leaves a file with no record, which is deleted at the next
+  start, along with any leftover staging files.
+- **Paths.** The file picker and save dialog are opened from Rust, and
+  dropped files are captured from the native window event. The webview never
+  gives Rust a path, so this adds no file-read or file-write primitive.
+- **Custody.** Added, verified, exported, notes and restores are chained with
+  HMAC-SHA256 per file, keyed from the vault key and covering the intake
+  hash. Editing, deleting, reordering or cutting entries shows as a broken
+  record. Verify and Export re-hash the decrypted copy against the intake
+  hashes, and an export is only kept if they match.
+- **Backups** carry the records and custody history, not the files. On
+  restore the history is chained again under the new vault's key, with a
+  final entry saying so.
+- **Limits.** Times come from this Mac's clock, and anyone with the master
+  password can rewrite the records. It is careful record keeping, not a
+  trusted timestamp or a forensic imager.
+
+### 8.8 Still open
 
 - **The app is unsigned.** Without a signature and the hardened runtime,
   another program running as the same user could inject code into the
@@ -723,14 +755,16 @@ refused.
 - **`tauri-plugin-fs` is still exposed** (see 7.12).
 - **No list virtualisation** (see 7.12).
 
-### 8.8 Verification
+### 8.9 Verification
 
-- `cargo test`: 71 passed, 2 ignored (the live-network HIBP checks).
+- `cargo test`: 83 passed, 2 ignored (the live-network HIBP checks).
   The tests run against real database files and close and reopen them where
   persistence matters. They cover format 3 migration and rollback, chain
   tampering, backup envelopes, the full agent flow over a real socket (approve,
   deny, timeout, disconnect, seal), RFC 6238 vectors for all three hash
-  algorithms, and QR reading from real images.
+  algorithms, QR reading from real images, and evidence storage (every size
+  around a chunk boundary, tampered copies, broken custody records, crashes
+  mid-intake, case deletion, and backups across vaults).
 - `cargo clippy --all-targets -- -D warnings`: clean in debug and release.
 - `npx tsc --noEmit`: clean.
 - Unlike section 7, the app was run: the release build was installed and
