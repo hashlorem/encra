@@ -1,9 +1,23 @@
 # Architecture review, 7 November 2026
 
-> Line numbers and file names refer to commit `b13c9e6`, before the rename. After commit `a4bd07c` the database is `encra.db` and `main.rs` line numbers have shifted.
+> Line numbers and file names refer to the first commit (Cobrypt 0.1.0), before the rename. Since the rename the database is `encra.db`, and `main.rs` has been split into command modules, so the line numbers no longer match.
 
+## Status, 13 November 2026
 
-Read-only review of commit `b13c9e6` (Cobrypt 0.1.0, being renamed to Encra).
+| # | Finding | Status |
+|---|---|---|
+| 1 | Unlock sent every secret to the webview | Fixed. The list carries no secrets; Show, Copy and the 2FA code fetch one field at a time, and copying happens in Rust. |
+| 2 | Account names stored and logged in plaintext | Fixed. `service` is encrypted like the other fields and sorted in Rust; the log says "added a login" with no name. |
+| 3 | Ciphertexts not bound to their row | Fixed. Fields are sealed with AES-256-GCM using the table, row id and column as associated data. |
+| 4 | Argon2 settings were library defaults and not stored | Fixed. Argon2id now uses 256 MiB, 3 passes, 1 lane, stored in `vault_config` as `kdf_params` and in every backup. |
+| 5 | Two Argon2 runs per unlock | Open. Unlock still checks the password hash and then derives the wrapping key. Dropping the hash in favour of the wrapped key's GCM tag is still undecided. |
+| 6 | Key and plaintext types didn't zeroize | Fixed. Keys and decrypted fields are wiped with `zeroize`. |
+| 7 | Database file world-readable | Fixed. The data folder is `0700` and the files `0600`. |
+| 8 | HIBP response size could hint at the prefix | Fixed. Requests send `Add-Padding: true`. |
+
+The original review follows unchanged.
+
+Read-only review of the first commit (Cobrypt 0.1.0, being renamed to Encra).
 I read the Rust backend (`vault.rs`, `main.rs`, `activity.rs`, `backup.rs`,
 `hibp.rs`), the Tauri config and the clipboard code. I did not run the tests,
 benchmark anything, or run a dependency audit (`cargo-audit` is not installed).

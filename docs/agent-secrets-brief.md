@@ -1,6 +1,6 @@
 # Brief: agent-safe secrets for Encra (`encra run`)
 
-> Line numbers and file names refer to commit `b13c9e6`, before the rename. After commit `a4bd07c` the database is `encra.db` and `main.rs` line numbers have shifted.
+> Line numbers and file names refer to the first commit (Cobrypt 0.1.0), before the rename. Since the rename the database is `encra.db`, and `main.rs` has been split into command modules, so the line numbers no longer match.
 
 
 (Encra was called Cobrypt when this was written; renamed 7 November 2026.)

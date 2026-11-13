@@ -1,10 +1,8 @@
 # Design Contract: Encra
 
 Replaces the "Terminal Authority" contract (Cobrypt, September 2026). The
-mockups this is drawn from live on the "Encra · Latent Print" page of the
-design canvas; the themes and the screens added in November 2026 (import,
-check-up, ⌘K, case indicators and timeline) are on its "Encra · Next round"
-page.
+themes and the screens added in November 2026 (import, check-up, ⌘K, case
+indicators and timeline) follow the same rules.
 
 ## Product Truth
 
@@ -159,7 +157,7 @@ first), and tightens entry and table padding. Nothing else changes.
 ### Motion
 
 Smooth everywhere, down to small details, but never bouncy or springy.
-Changed 7 November 2026 at Stephen's request; this replaces "functional only".
+Changed 7 November 2026; this replaces "functional only".
 
 - **Tokens:** `--dur-fast` 140ms (hover, press), `--dur` 220ms (crossfades,
   focus lines), `--dur-slow` 360ms (entrances, the strength bar). One easing,

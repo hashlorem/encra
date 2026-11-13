@@ -1,20 +1,28 @@
-# Encra Security Audit Writeup
+# Encra security audit
 
-> Encra was called Cobrypt (and KeyRPT before that) when sections 1 to 7 were written. Section 8 covers the work done after the rename.
+Encra was called Cobrypt, and KeyRPT before that, when sections 1 to 7 were
+written in July 2026. Section 8 covers the work after the rename.
 
-> **Audience:** Beginner cybersecurity students and junior developers.  
-> **Date:** July 2026  
-> **Stack:** Tauri 2 + Rust + React 19 + TypeScript + SQLite, AES-256-GCM + Argon2id
+Stack: Tauri 2, Rust, React 19, TypeScript, SQLite, AES-256-GCM and Argon2id.
 
 ---
 
-## 1. Project Overview
+## 1. Why I audited it
 
-**Cobrypt** (formerly KeyRPT) is a local-first encrypted security workbench — a desktop app for managing passwords, TOTP 2FA codes, pentest journals, Nmap scan results, and a security command reference. All data stays on your machine. No cloud accounts. No telemetry.
+Encra keeps passwords, 2FA secrets and pentest notes on one machine, with no
+cloud account and no telemetry. I wrote the first version quickly to see if
+the idea worked, then went back through it assuming someone had a copy of the
+database file but not my master password.
 
-**Why it needed an audit:** the initial implementation was built quickly to prove the concept works. Speed over safety. The audit found the encryption key itself stored in the database, recovery codes that could permanently destroy access to your passwords, and a hand-rolled Base64 decoder that randomly failed on certain password lengths. All three could lose your data silently.
+That pass found three critical bugs. The encryption key itself was stored in
+the database. A recovery code could leave the vault permanently unreadable.
+And a Base64 decoder I had written by hand failed on some password lengths.
+Any of the three could lose data without an error.
 
-**What we fixed:** 3 critical bugs, 4 recovery-flow hardening items, and a full field-level encryption migration covering 15 sensitive fields across 4 database tables. 12 Rust tests now verify the fixes.
+I fixed all three, hardened the recovery flow in four places, and moved 15
+sensitive fields across 4 tables to field-level encryption. 12 Rust tests
+cover those fixes. The sections below go through each bug: what it was, how
+to reproduce it, the fix, and the test that now catches it.
 
 ---
 
@@ -24,11 +32,11 @@
 
 **What the bug was (plain language):**
 
-The app asked you for a master password, derived an encryption key from it, then stored *that exact key* in the database — base64-encoded, sitting right next to your encrypted passwords. Anyone who got a copy of `keyrpt.db` could decode it and decrypt everything without knowing your password. It's like locking your house and taping the key to the front door.
+The app asked you for a master password, derived an encryption key from it, then stored *that exact key* in the database: base64-encoded, sitting right next to your encrypted passwords. Anyone who got a copy of `keyrpt.db` could decode it and decrypt everything without knowing the password.
 
 **Technical detail:**
 
-`vault.rs:177-181` — the original `hash_password()` function:
+`vault.rs:177-181`: the original `hash_password()` function:
 
 ```rust
 pub fn hash_password(password: &str, salt: &[u8]) -> Result<String, String> {
@@ -43,7 +51,7 @@ The same function was used for both *key derivation* (producing the actual encry
 
 **Why it mattered:**
 
-An attacker with file access to your machine — malware, stolen laptop, compromised backup — could:
+An attacker with file access to your machine (malware, stolen laptop, compromised backup) could:
 1. Open `keyrpt.db` with any SQLite viewer
 2. `SELECT value FROM vault_config WHERE key = 'master_hash'` → get the base64 key
 3. Decode it → recover the raw 32-byte AES-256 key
@@ -55,19 +63,19 @@ The master password was completely bypassed. All existing credentials were expos
 
 Replaced with a **DEK model** (Data Encryption Key). Three changes:
 
-1. **`vault.rs:92-96`** — New `generate_dek()` creates a random 32-byte key using `OsRng`. This DEK is never shown to the user and never derived from their password.
+1. **`vault.rs:92-96`**: New `generate_dek()` creates a random 32-byte key using `OsRng`. This DEK is never shown to the user and never derived from their password.
 
-2. **`vault.rs:99-112`** — New `wrap_dek()` encrypts the DEK with a wrapping key derived from the master password using AES-256-GCM. Only the wrapped (encrypted) DEK is stored in `vault_config.encrypted_dek`.
+2. **`vault.rs:99-112`**: New `wrap_dek()` encrypts the DEK with a wrapping key derived from the master password using AES-256-GCM. Only the wrapped (encrypted) DEK is stored in `vault_config.encrypted_dek`.
 
-3. **`vault.rs:178-194`** — `hash_password()` now uses the standard Argon2 PHC string format (`$argon2id$v=19$m=19456,t=2,p=1$...`). This is a non-reversible hash — you can verify a password against it, but you cannot recover the wrapping key from it. `verify_password()` (line 189) uses the `PasswordVerifier` trait for checking.
+3. **`vault.rs:178-194`**: `hash_password()` now uses the standard Argon2 PHC string format (`$argon2id$v=19$m=19456,t=2,p=1$...`). This is a non-reversible hash: you can verify a password against it, but you cannot recover the wrapping key from it. `verify_password()` (line 189) uses the `PasswordVerifier` trait for checking.
 
 The wrapping key now exists **only in memory** during an active session. It's never written to disk.
 
 **Verification:**
 
-- `test_legacy_migration_success` — confirms legacy key derivation is deterministic per-password, and wrong passwords produce different hashes
-- `test_migration_key_roundtrip` — confirms encrypt→decrypt→re-encrypt with new DEK works, and the old key cannot decrypt new ciphertext
-- `test_recovery_code_full_reset_flow` — full create→generate codes→recover→reset→reopen→verify flow against a file-backed database
+- `test_legacy_migration_success`: confirms legacy key derivation is deterministic per-password, and wrong passwords produce different hashes
+- `test_migration_key_roundtrip`: confirms encrypt→decrypt→re-encrypt with new DEK works, and the old key cannot decrypt new ciphertext
+- `test_recovery_code_full_reset_flow`: full create→generate codes→recover→reset→reopen→verify flow against a file-backed database
 
 ---
 
@@ -81,16 +89,16 @@ The lock screen had a "reset via recovery code" button. If you used it while the
 3. Replace the old key with the new one
 4. **Skip re-encrypting** your existing passwords (because the old key wasn't in memory)
 
-Result: your passwords were still encrypted with the old key, which was now gone. All your data became permanently undecryptable — and the app gave no warning.
+Result: your passwords were still encrypted with the old key, which was now gone. All your data became permanently undecryptable, and the app gave no warning.
 
 **Technical detail:**
 
-`main.rs:507-520` — the original `reset_master_password()`:
+`main.rs:507-520`: the original `reset_master_password()`:
 
 ```rust
 let old_key = state.encryption_key.lock()?;
 if let Some(old_key) = *old_key {  // <-- evaluates to false when vault is LOCKED
-    // re-encrypt loop — NEVER RUNS when called from lock screen
+    // re-encrypt loop: NEVER RUNS when called from lock screen
 }
 // new key replaces old key in vault_config
 // existing passwords remain encrypted with now-unavailable old key
@@ -98,7 +106,7 @@ if let Some(old_key) = *old_key {  // <-- evaluates to false when vault is LOCKE
 
 When the vault is locked, `state.encryption_key` is `None`. The `if let Some(old_key)` guard evaluates to `false`, the entire re-encryption block is skipped, but the new key is still written to the database.
 
-Additionally: `activity.rs:61-69` — the original `verify_recovery_code()` deleted the recovery code row **before** the password reset completed. If the reset failed for any reason, the code was already consumed and couldn't be retried.
+Also, in `activity.rs:61-69` the original `verify_recovery_code()` deleted the recovery code row **before** the password reset completed. If the reset failed for any reason, the code was already consumed and couldn't be retried.
 
 **Why it mattered:**
 
@@ -108,20 +116,20 @@ A user who forgot their password, used the recovery flow from the lock screen (a
 
 Complete redesign of the recovery system across three files:
 
-1. **`activity.rs:48-101`** — `generate_recovery_codes()` now wraps the DEK with each code. For every code (26 base32 chars, 130 bits entropy): generates a unique random salt → Argon2id derives a recovery wrapping key → AES-256-GCM wraps the DEK → stores SHA-256 hash of the code, salt, and wrapped DEK.
+1. **`activity.rs:48-101`**: `generate_recovery_codes()` now wraps the DEK with each code. For every code (26 base32 chars, 130 bits entropy): generates a unique random salt → Argon2id derives a recovery wrapping key → AES-256-GCM wraps the DEK → stores SHA-256 hash of the code, salt, and wrapped DEK.
 
-2. **`activity.rs:106-169`** — `recover_dek()` finds the code by its hash, derives the recovery key, unwraps the DEK. Returns the DEK + row ID. Does NOT delete the code — that's the caller's job inside a transaction.
+2. **`activity.rs:106-169`**: `recover_dek()` finds the code by its hash, derives the recovery key, unwraps the DEK. Returns the DEK + row ID. Does NOT delete the code: that's the caller's job inside a transaction.
 
-3. **`activity.rs:178-226`** — `commit_recovery_reset()` runs the actual password change in one BEGIN IMMEDIATE/COMMIT transaction: generates new random KDF salt, derives new wrapping key, wraps the DEK, writes `encrypted_dek`, `password_hash`, and `kdf_salt`, and consumes the recovery code — all atomically. Rollback on any failure.
+3. **`activity.rs:178-226`**: `commit_recovery_reset()` runs the actual password change in one BEGIN IMMEDIATE/COMMIT transaction: generates new random KDF salt, derives new wrapping key, wraps the DEK, writes `encrypted_dek`, `password_hash`, and `kdf_salt`, and consumes the recovery code: all atomically. Rollback on any failure.
 
-4. **`main.rs:530-546`** — `reset_master_password()` now calls `recover_dek()` (works from locked state) → `commit_recovery_reset()` (atomic) → sets in-memory DEK (auto-unlocks).
+4. **`main.rs:530-546`**: `reset_master_password()` now calls `recover_dek()` (works from locked state) → `commit_recovery_reset()` (atomic) → sets in-memory DEK (auto-unlocks).
 
 **Verification:**
 
-- `test_recovery_code_roundtrip` — generate codes, recover DEK with valid code, confirm DEK matches original, confirm row deleted by caller prevents reuse
-- `test_recovery_code_wrong_code_fails` — wrong code returns `None`, not an error
-- `test_recovery_code_full_reset_flow` — file-backed DB: create vault → generate codes → recover from locked → reset → close and reopen → unlock with new password → verify credentials decrypt → confirm old password fails → confirm code consumed
-- `test_recovery_reset_rollback_on_failure` — inject schema failure mid-transaction, confirm code NOT consumed, confirm DEK unchanged, confirm old password still works
+- `test_recovery_code_roundtrip`: generate codes, recover DEK with valid code, confirm DEK matches original, confirm row deleted by caller prevents reuse
+- `test_recovery_code_wrong_code_fails`: wrong code returns `None`, not an error
+- `test_recovery_code_full_reset_flow`: file-backed DB: create vault → generate codes → recover from locked → reset → close and reopen → unlock with new password → verify credentials decrypt → confirm old password fails → confirm code consumed
+- `test_recovery_reset_rollback_on_failure`: inject schema failure mid-transaction, confirm code NOT consumed, confirm DEK unchanged, confirm old password still works
 
 ---
 
@@ -129,13 +137,13 @@ Complete redesign of the recovery system across three files:
 
 **What the bug was (plain language):**
 
-The app used a custom-written Base64 decoder. It had a math error: it stripped the `=` padding characters, then required the remaining length to be divisible by 4. But standard Base64 strings often have remaining lengths of 2 or 3 (that's why the padding exists). The decoder rejected these as "invalid" — including perfectly valid AES-GCM ciphertext produced by the encrypt function.
+The app used a custom-written Base64 decoder. It had a math error: it stripped the `=` padding characters, then required the remaining length to be divisible by 4. But standard Base64 strings often have remaining lengths of 2 or 3 (that's why the padding exists). The decoder rejected these as "invalid": including perfectly valid AES-GCM ciphertext produced by the encrypt function.
 
-Password length determined encrypted output length, which determined Base64 output length. At 20 characters (the generated default), it happened to work. At 12, 13, 16, or 17 characters, it would fail — showing `[decryption failed]` even with the correct master password.
+Password length determined encrypted output length, which determined Base64 output length. At 20 characters (the generated default), it happened to work. At 12, 13, 16, or 17 characters, it would fail: showing `[decryption failed]` even with the correct master password.
 
 **Technical detail:**
 
-`vault.rs:146-161` — the custom decoder:
+`vault.rs:146-161`: the custom decoder:
 
 ```rust
 let bytes: Vec<u8> = input.bytes().filter(|&b| b != b'=').collect();
@@ -150,15 +158,15 @@ The decrypt path: AES-GCM ciphertext length = plaintext length + 16 (auth tag) +
 
 **Why it mattered:**
 
-The bug was triggered by the password itself — shorter or specific-length passwords became permanently undecryptable. A user could add a credential with a 12-character password, lock the vault, unlock, and see `[decryption failed]` with no explanation. The password wasn't lost — the code literally couldn't read its own encrypted output.
+The password itself triggered the bug: passwords of certain lengths became permanently undecryptable. A user could add a credential with a 12-character password, lock the vault, unlock, and see `[decryption failed]` with no explanation. The password wasn't lost. The code just couldn't read its own encrypted output.
 
 **The fix:**
 
-Replaced the entire handwritten implementation with the `base64` crate (v0.22) — a well-tested, standard implementation used across thousands of Rust projects. `vault.rs:4` adds `use base64::Engine;`, and all calls use `base64::engine::general_purpose::STANDARD.encode()` / `.decode()`. One import, all edge cases handled.
+Replaced the entire handwritten implementation with the `base64` crate (v0.22): a well-tested, standard implementation used across thousands of Rust projects. `vault.rs:4` adds `use base64::Engine;`, and all calls use `base64::engine::general_purpose::STANDARD.encode()` / `.decode()`. One import, all edge cases handled.
 
 **Verification:**
 
-- `test_end_to_end_field_encryption` — encrypts and decrypts passwords of multiple lengths (12, 25+ chars) across all field types
+- `test_end_to_end_field_encryption`: encrypts and decrypts passwords of multiple lengths (12, 25+ chars) across all field types
 - All 12 tests pass against the same code paths
 - The standard `base64` crate's test suite (upstream) covers thousands of edge cases
 
@@ -175,7 +183,7 @@ Only the password field was encrypted. Your usernames, the websites you use, you
 A stolen database would reveal:
 - Every service you have an account on (usernames, URLs)
 - Your notes (which often contain security questions, recovery info)
-- TOTP secrets (which generate your 2FA codes — rendering 2FA useless)
+- TOTP secrets (anyone holding them can generate your 2FA codes, which makes 2FA useless)
 - Your pentest targets, findings, and methodology
 - Your personal security command reference
 
@@ -183,7 +191,7 @@ The password was protected, but the context around it told a complete story.
 
 **The fix:**
 
-`vault.rs:199-213` — added `encrypt_opt()` and `decrypt_opt()` helpers for optional fields:
+`vault.rs:199-213`: added `encrypt_opt()` and `decrypt_opt()` helpers for optional fields:
 
 ```rust
 pub fn encrypt_opt(key: &[u8; 32], value: &Option<String>) -> Result<Option<String>, String>
@@ -199,13 +207,13 @@ Updated every CRUD operation across 4 tables:
 | `journal_entries` | `title`, `content` | `id`, `project_id`, `entry_type`, `severity` |
 | `kb_entries` | `title`, `command`, `description`, `tags` | `id`, `category` |
 
-Search keys (`service`, `name`, `category`) stay plaintext so you can search and filter. Metadata (`entry_type`, `severity`, `status`) stays plaintext — it's not sensitive.
+Search keys (`service`, `name`, `category`) stay plaintext so you can search and filter. Metadata (`entry_type`, `severity`, `status`) stays plaintext: it's not sensitive.
 
 **Migration path (`main.rs:302-361`):** `migrate_plaintext_fields()` runs on any vault with `schema_version = '1'`. It reads each plaintext field, encrypts it with the DEK, and writes back the ciphertext. Sets version to `'2'`. New vaults start at `'2'`. **No database deletion required.**
 
 **Verification:**
 
-- `test_end_to_end_field_encryption` — creates vault, inserts 3 credentials (short pw, long pw with special chars, with TOTP), 1 project, 1 journal entry, 1 KB entry. Re-opens DB. Verifies all fields decrypt correctly. **Then directly queries SQLite** to prove fields are stored as base64 ciphertext (not readable), while metadata fields (service, name, entry_type, severity, category) remain plaintext.
+- `test_end_to_end_field_encryption`: creates vault, inserts 3 credentials (short pw, long pw with special chars, with TOTP), 1 project, 1 journal entry, 1 KB entry. Re-opens DB. Verifies all fields decrypt correctly. **Then directly queries SQLite** to prove fields are stored as base64 ciphertext (not readable), while metadata fields (service, name, entry_type, severity, category) remain plaintext.
 
 ---
 
@@ -213,11 +221,11 @@ Search keys (`service`, `name`, `category`) stay plaintext so you can search and
 
 **What the bug was (plain language):**
 
-Locking the vault changed the screen back to the lock screen, but the Rust backend didn't actually check whether the vault was unlocked. You could still delete credentials, modify TOTP, create journal entries, import backups — all from a locked state if you could send commands directly (or if a bug in the UI left a backdoor).
+Locking the vault changed the screen back to the lock screen, but the Rust backend didn't actually check whether the vault was unlocked. You could still delete credentials, modify TOTP, create journal entries, import backups: all from a locked state if you could send commands directly (or if a bug in the UI left a backdoor).
 
 **The fix:**
 
-`main.rs:26-32` — `require_unlocked()` and `require_db()` guards added. Every protected command (20 total) now calls `require_unlocked()` at the start. Locked calls return `"vault is locked"` error.
+`main.rs:26-32`: `require_unlocked()` and `require_db()` guards added. Every protected command (20 total) now calls `require_unlocked()` at the start. Locked calls return `"vault is locked"` error.
 
 ---
 
@@ -225,7 +233,7 @@ Locking the vault changed the screen back to the lock screen, but the Rust backe
 
 **What the bug was:**
 
-Exporting a backup from one vault and importing into another vault (with a different master password) would import the raw encrypted passwords — which were encrypted with the source vault's key, not the destination's. The imported passwords would show `[decryption failed]`.
+Exporting a backup from one vault and importing into another vault (with a different master password) would import the raw encrypted passwords, which were encrypted with the source vault's key, not the destination's. The imported passwords would show `[decryption failed]`.
 
 **The fix:**
 
@@ -237,9 +245,9 @@ Exporting a backup from one vault and importing into another vault (with a diffe
 
 ### 2.7 MEDIUM: Nmap parser missed self-closing XML elements
 
-**The bug:** Nmap XML uses `<address addr="192.168.1.1" />` and `<hostname name="webserver" />` — self-closing elements. The original parser only handled these in the `Event::Start` branch. Self-closing elements trigger `Event::Empty` in quick-xml. Hosts appeared with blank IPs.
+**The bug:** Nmap XML uses `<address addr="192.168.1.1" />` and `<hostname name="webserver" />`: self-closing elements. The original parser only handled these in the `Event::Start` branch. Self-closing elements trigger `Event::Empty` in quick-xml. Hosts appeared with blank IPs.
 
-**The fix:** `nmap.rs:151-168` — added `b"address"` and `b"hostname"` handlers to the `Event::Empty` match arm.
+**The fix:** `nmap.rs:151-168`: added `b"address"` and `b"hostname"` handlers to the `Event::Empty` match arm.
 
 ---
 
@@ -264,19 +272,19 @@ During the audit, the recommendation was made to simply delete the old database 
 
 **First time (DEK model upgrade):** Deleting the old DB would be a data-loss event for any real user. Instead, `migrate_legacy_vault()` (`main.rs:204-300`) detects legacy vaults by the presence of `master_hash` with empty `encrypted_dek`/`password_hash`, derives the old key, decrypts all credentials, generates a new random DEK, re-encrypts everything, and clears the legacy field. All in one transaction. Wrong password = rollback, no change.
 
-**Second time (plaintext→encrypted fields):** Same pattern. `migrate_plaintext_fields()` (`main.rs:302-361`) checks `schema_version`, encrypts every plaintext field in-place, and bumps the version. Users upgrade on their next unlock — no manual action, no data loss.
+**Second time (plaintext→encrypted fields):** Same pattern. `migrate_plaintext_fields()` (`main.rs:302-361`) checks `schema_version`, encrypts every plaintext field in-place, and bumps the version. Users upgrade on their next unlock: no manual action, no data loss.
 
 The principle: **"Delete the database" is never an acceptable migration strategy for a tool that stores user data.** Every schema change must ship with an automatic, transactional migration path.
 
 ---
 
-## 4. `thread_rng()` vs `OsRng` — A False Alarm
+## 4. `thread_rng()` vs `OsRng`: a false alarm
 
-One audit finding flagged that `activity.rs:191` used `rand::thread_rng()` instead of `OsRng`. The concern was inconsistency — `vault.rs` uses `OsRng` everywhere.
+One audit finding flagged that `activity.rs:191` used `rand::thread_rng()` instead of `OsRng`. The concern was inconsistency: `vault.rs` uses `OsRng` everywhere.
 
-**The truth:** `thread_rng()` in Rust is ChaCha12, a properly-seeded CSPRNG. It's not a weak LCG or userspace PRNG — it gets entropy from the OS just like `OsRng` does. The only difference is performance: `OsRng` makes a syscall for every request, while `thread_rng()` uses a per-thread CSPRNG seeded from the OS once.
+**The truth:** `thread_rng()` in Rust is ChaCha12, a properly-seeded CSPRNG. It's not a weak LCG or userspace PRNG: it gets entropy from the OS just like `OsRng` does. The only difference is performance: `OsRng` makes a syscall for every request, while `thread_rng()` uses a per-thread CSPRNG seeded from the OS once.
 
-The swap to `aes_gcm::aead::OsRng` in `activity.rs:191` was done for **consistency**, not security. Both were fine. This is a good example of "looks suspicious" vs "is actually vulnerable" — consistency matters for auditability and avoiding future mistakes, even when the current code is secure.
+The swap to `aes_gcm::aead::OsRng` in `activity.rs:191` was done for **consistency**, not security. Both were fine. This is a good example of "looks suspicious" vs "is actually vulnerable": consistency matters for auditability and avoiding future mistakes, even when the current code is secure.
 
 ---
 
@@ -284,7 +292,7 @@ The swap to `aes_gcm::aead::OsRng` in `activity.rs:191` was done for **consisten
 
 The `test_end_to_end_field_encryption` test (`main.rs:1048-1190`) goes further than any other test:
 
-1. Creates a file-backed SQLite database (not in-memory — data persists)
+1. Creates a file-backed SQLite database (not in-memory, so data persists)
 2. Inserts data directly via SQL with `vault::encrypt()`
 3. Tests multi-length passwords (12 and 25+ chars), multiline notes, TOTP secrets
 4. Re-opens the database from disk (simulating app restart)
@@ -300,7 +308,7 @@ This test proves end-to-end: the encryption path produces ciphertext that surviv
 
 ### Watch for happy-path-only testing
 
-The original recovery code test (`test_recovery_code_new_password_works`) was a structural test that never actually called `reset_master_password`. It verified the tables existed. That's not testing. The replacement (`test_recovery_code_full_reset_flow`) tests the real function against a file-backed database with close/reopen — proving data survives a restart, not just an in-memory check.
+The original recovery code test (`test_recovery_code_new_password_works`) was a structural test that never actually called `reset_master_password`. It verified the tables existed. That's not testing. The replacement (`test_recovery_code_full_reset_flow`) tests the real function against a file-backed database with close/reopen: proving data survives a restart, not just an in-memory check.
 
 **Pattern:** If your test doesn't close and reopen the database, you haven't proven persistence. If your test doesn't inject a failure mid-operation, you haven't proven rollback.
 
@@ -332,11 +340,11 @@ The recovery code flow originally verified the code first, then did the reset. B
 
 Five times during this audit, a finding was "confirmed by reading the code" but a test proved it wrong. The legacy detection test had an always-true assertion. The recovery test never called the reset function. The original migration test only tested key derivation in isolation.
 
-**Pattern:** A passing test that doesn't exercise the real code path is worse than no test — it gives false confidence. Every test must call the actual production function.
+**Pattern:** A passing test that doesn't exercise the real code path is worse than no test: it gives false confidence. Every test must call the actual production function.
 
 ---
 
-## 7. Second audit — September 2026
+## 7. Second audit, September 2026
 
 A follow-up pass over the same code found that several items from the first audit
 were either incomplete or had regressions of their own. Everything below was
@@ -352,16 +360,16 @@ Two separate defects sat on top of each other:
    `bundled`. Tauri rejects the call before any code runs, so "Restore backup"
    failed every time with an argument error.
 2. **Only the password field was portable.** `collect_all()` decrypted the
-   credential password but wrote `username`, `url`, `notes`, `totp_secret` — and
-   every project, journal and command field — as the *source* vault's ciphertext.
+   credential password but wrote `username`, `url`, `notes`, `totp_secret` (and
+   every project, journal and command field) as the *source* vault's ciphertext.
    Import re-encrypted only the password, so everything else stayed encrypted
    under a key the destination vault does not have.
 
 **Fixes:** `backup.rs` now decrypts every sensitive field into the plaintext
 payload (inside the encrypted envelope) and re-encrypts every one of them with
 the destination key on import. The frontend sends the correct `bundled` key. A
-`v1.0` payload — which only ever worked when restored into the vault that made
-it — is still accepted, but each field is verified to be readable with the
+`v1.0` payload (which only ever worked when restored into the vault that made
+it) is still accepted, but each field is verified to be readable with the
 current key, and a foreign-vault payload is rejected with an explanation rather
 than silently written back as unreadable bytes.
 
@@ -373,8 +381,8 @@ longer read the destination's rows),
 ### 7.2 HIGH: Import was not atomic
 
 `restore_all()` ran every `INSERT` without a transaction, and generated primary
-keys from only 4 random bytes (32 bits). A failure part-way through — or a key
-collision — left a partially imported vault. Journal entries whose project was
+keys from only 4 random bytes (32 bits). A failure part-way through, or a key
+collision, left a partially imported vault. Journal entries whose project was
 absent from the payload were given a fresh, non-existent project id, which
 violated the foreign key and aborted the import mid-way.
 
@@ -389,7 +397,7 @@ last table and asserts nothing was written),
 ### 7.3 HIGH: Recovery code could be spent twice
 
 `reset_master_password` looked the code up with `recover_dek()` and then called
-`commit_recovery_reset()` — two separate calls. Only the second was atomic, so
+`commit_recovery_reset()`: two separate calls. Only the second was atomic, so
 two concurrent attempts could both pass the lookup before either consumed the
 code. This is the same Check → Act → Consume shape the first audit set out to
 remove.
@@ -445,7 +453,7 @@ a bounded response read.
 
 `reset_master_password` accepted an empty new password, `export_backup` accepted
 an empty backup password, `setup_totp` did not check that the credential existed,
-and `validate_secret` accepted secrets below the RFC 4226 floor — a one-character
+and `validate_secret` accepted secrets below the RFC 4226 floor: a one-character
 secret decodes to zero bytes and produced an HMAC over an empty key.
 
 **Fix:** minimum lengths are enforced where a password is *created* (12 chars for
@@ -489,7 +497,7 @@ separate `devCsp` keeps the dev server working.
 - The in-memory DEK is now wrapped in a `Dek` guard whose buffer is zeroed on
   drop, and `lock_vault` overwrites the stored key in place instead of just
   dropping the reference. Plaintext passwords held during the legacy migration
-  are wiped afterwards. **This is best-effort only** — it cannot defend against
+  are wiped afterwards. **This is best-effort only**: it cannot defend against
   swap, hibernation, or an attacker who already controls the machine.
 - Every `aes_gcm::aead::OsRng` / `thread_rng` call site was unified through
   `util::os_rng()`.
@@ -550,7 +558,7 @@ Stated plainly so it is not mistaken for complete:
   the 8px grid the design contract specifies.
 - **`migrate_legacy_vault` does not re-encrypt `username`/`url`/`notes`.** Those
   are plaintext in a legacy vault and are encrypted afterwards by
-  `migrate_plaintext_fields`, so the end state is correct — but the two steps
+  `migrate_plaintext_fields`, so the end state is correct, but the two steps
   are not one transaction.
 
 - **Light-theme overrides on hardcoded surfaces.** The token work covers the
@@ -571,10 +579,10 @@ Stated plainly so it is not mistaken for complete:
 
 Run and passing:
 
-- `cargo test` — 22 passed, 2 ignored (the two live-network HIBP checks, now
+- `cargo test`: 22 passed, 2 ignored (the two live-network HIBP checks, now
   `#[ignore]`d so the suite is offline and deterministic).
-- `cargo clippy --all-targets -- -D warnings` — clean.
-- `npx tsc -b && npm run build` — clean.
+- `cargo clippy --all-targets -- -D warnings`: clean.
+- `npx tsc -b && npm run build`: clean.
 
 Checked mechanically against the build output:
 
