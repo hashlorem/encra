@@ -1,6 +1,6 @@
 # Encra
 
-Encra is a desktop app that keeps a security practitioner's working material in one encrypted file on their own machine: logins and their 2FA codes, case notes with an evidence locker, a few everyday tools, and a log of everything that touched the vault. There is no account, no sync and no telemetry. The only network request it makes is the Have I Been Pwned range query, and that one comes from Rust, not the window.
+Encra is a desktop app for the passwords, 2FA codes, case notes and evidence files a security practitioner works with, kept in one encrypted file on their own machine. It also has a few everyday tools and a log of everything that touched the vault. There is no account, no sync and no telemetry. The only network request it makes is the Have I Been Pwned range query, and that one comes from Rust, not the window.
 
 ![The Encra vault with a demo login open, showing its one-time code](docs/screenshot.png)
 
